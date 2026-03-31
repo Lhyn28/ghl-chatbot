@@ -11,17 +11,26 @@ const conversationHistory = {};
 
 app.post('/webhook/ghl-chat', async (req, res) => {
   const { conversation_id, message, contact_name } = req.body;
+
+  // 🔥 DEBUG (so we see incoming data)
+  console.log("🔥 WEBHOOK HIT:", JSON.stringify(req.body, null, 2));
+
   res.sendStatus(200);
 
   if (!conversationHistory[conversation_id]) {
     conversationHistory[conversation_id] = [];
   }
 
+  // ✅ FIX: Safely handle message (string OR object)
+  const userMessage = typeof message === "string"
+    ? message
+    : message?.body || "";
+
   // ✅ Only store valid messages
-  if (message && message.trim() !== "") {
+  if (userMessage && userMessage.trim() !== "") {
     conversationHistory[conversation_id].push({
       role: 'user',
-      content: message
+      content: userMessage
     });
 
     const aiReply = await callOpenRouter(conversation_id, contact_name);
@@ -58,7 +67,7 @@ Your job:
 - Keep replies short (2–4 sentences)
 - Ask helpful follow-up questions`
         },
-        // ✅ FILTER invalid messages (THIS FIXES YOUR ERROR)
+        // ✅ FILTER invalid messages
         ...history.filter(msg => msg.content && msg.content.trim() !== "")
       ]
     })
@@ -66,7 +75,7 @@ Your job:
 
   const data = await response.json();
 
-  // 🔥 DEBUG LOG
+  // 🔥 DEBUG OpenRouter response
   console.log("OPENROUTER RESPONSE:", JSON.stringify(data, null, 2));
 
   // ✅ Safe fallback
