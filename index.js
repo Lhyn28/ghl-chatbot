@@ -4,8 +4,8 @@ import fetch from 'node-fetch';
 const app = express();
 app.use(express.json());
 
-const GHL_API_KEY = process.env.GHL_API_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const GHL_API_KEY = process.env.pit-d1e079d0-0927-45e7-b9eb-6c3747ec4037;
+const OPENROUTER_API_KEY = process.env.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;
 
 const conversationHistory = {};
 
