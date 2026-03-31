@@ -9,6 +9,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const CALENDAR_ID = process.env.CALENDAR_ID;
 
 const leadData = {};
+const history = {};
 
 // =============================
 // 🚀 WEBHOOK
@@ -16,11 +17,10 @@ const leadData = {};
 app.post('/webhook/ghl-chat', async (req, res) => {
   res.sendStatus(200);
 
-  console.log("🔥 RAW BODY:", JSON.stringify(req.body, null, 2));
+  console.log("🔥 BODY:", JSON.stringify(req.body));
 
   const contactId = req.body.contact_id;
 
-  // 🔥 SAFE MESSAGE EXTRACTION
   let message = "";
   if (typeof req.body.message === "string") {
     message = req.body.message;
@@ -28,32 +28,31 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     message = req.body.message.body;
   }
 
-  if (!contactId) {
-    console.log("❌ Missing contactId");
-    return;
-  }
-
-  if (!message) {
-    console.log("❌ No message detected");
-    await sendMessage(contactId, "Hi 😊 I didn’t catch that, can you try again?");
+  if (!contactId || !message) {
+    console.log("❌ Missing data");
     return;
   }
 
   console.log("📩 USER:", message);
 
+  // =============================
+  // 🧠 INIT USER
+  // =============================
   if (!leadData[contactId]) {
     leadData[contactId] = {
       name: null,
       email: null,
       stage: "ask_name",
-      booking: { date: null, time: null, saved: false }
+      booking: { date: null, time: null, saved: false },
+      ghlId: contactId
     };
+    history[contactId] = [];
   }
 
   const lead = leadData[contactId];
 
   // =============================
-  // 🧠 CAPTURE NAME
+  // 🧠 CAPTURE NAME (LOCKED)
   // =============================
   if (!lead.name) {
     const name = extractName(message);
@@ -83,7 +82,10 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
   try {
 
-    // 🎯 FLOW
+    // =============================
+    // 🎯 STRICT FLOW
+    // =============================
+
     if (lead.stage === "ask_name") {
       reply = "Hi 😊 how are you today? May I know your name?";
       lead.stage = "get_name";
@@ -91,7 +93,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
     else if (lead.stage === "get_name") {
       if (lead.name) {
-        reply = `Nice to meet you, ${lead.name} 😊 What's your email?`;
+        reply = `Nice to meet you, ${lead.name} 😊 What's your email so I can send details?`;
         lead.stage = "get_email";
       } else {
         reply = "Sorry I didn’t catch your name 😊";
@@ -102,6 +104,8 @@ app.post('/webhook/ghl-chat', async (req, res) => {
       if (lead.email) {
         reply = "Perfect 😊 What are you trying to improve?";
         lead.stage = "assist";
+
+        await createOrUpdateContact(lead);
       } else {
         reply = "Could you share your email? 😊";
       }
@@ -109,7 +113,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
     else {
       reply = await safeAI(message);
-      reply += "\n\nWe can also hop on a quick call if you want 😊";
+      reply += "\n\nIf you want, we can go through this properly on a quick call 😊";
     }
 
   } catch (err) {
@@ -118,7 +122,21 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   }
 
   // =============================
-  // 🔥 BOOKING
+  // 🔥 HANDLE NOT AVAILABLE
+  // =============================
+  if (message.toLowerCase().includes("not available")) {
+    reply = `No problem 😊 Here are other times:\n${suggestDates()}`;
+  }
+
+  // =============================
+  // 🔥 SUGGEST TIMES
+  // =============================
+  if (lead.booking.date && !lead.booking.time) {
+    reply += `\n\nAvailable times:\n${suggestDates()}`;
+  }
+
+  // =============================
+  // 🔥 FINAL BOOKING
   // =============================
   if (
     lead.booking.date &&
@@ -128,13 +146,17 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   ) {
     lead.booking.saved = true;
 
-    await createAppointment(contactId, lead);
+    await createAppointment(lead);
 
-    reply = "Perfect 😊 you're booked! You'll receive confirmation soon.";
+    const formatted = formatDate(lead.booking.date, lead.booking.time);
+
+    reply = `Perfect ${lead.name || ""} 😊 you're booked for ${formatted}. 
+
+You'll receive a confirmation email shortly.`;
   }
 
   // =============================
-  // 📤 SEND
+  // 📤 SEND MESSAGE
   // =============================
   await sendMessage(contactId, reply);
 
@@ -143,7 +165,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
 
 // =============================
-// 🤖 SAFE AI
+// 🤖 SAFE AI (NEVER FAIL)
 // =============================
 async function safeAI(message) {
   try {
@@ -158,7 +180,10 @@ async function safeAI(message) {
         messages: [
           {
             role: 'system',
-            content: `You are a helpful and confident sales assistant. Always guide toward booking.`
+            content: `You are a confident sales assistant.
+- Answer clearly
+- Suggest solutions
+- Guide toward booking`
           },
           { role: 'user', content: message }
         ]
@@ -176,10 +201,40 @@ async function safeAI(message) {
 
 
 // =============================
-// 🔥 BOOKING
+// 🔥 CREATE / UPDATE CONTACT
 // =============================
-async function createAppointment(contactId, lead) {
+async function createOrUpdateContact(lead) {
+  try {
+    const res = await fetch('https://services.leadconnectorhq.com/contacts/', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${GHL_API_KEY}`,
+        'Content-Type': 'application/json',
+        Version: '2021-04-15'
+      },
+      body: JSON.stringify({
+        firstName: lead.name,
+        email: lead.email
+      })
+    });
+
+    const data = await res.json();
+    if (data.contact?.id) {
+      lead.ghlId = data.contact.id;
+    }
+  } catch (err) {
+    console.log("❌ CONTACT ERROR:", err);
+  }
+}
+
+
+// =============================
+// 🔥 CREATE APPOINTMENT (REAL)
+// =============================
+async function createAppointment(lead) {
   const iso = buildDateTime(lead.booking.date, lead.booking.time);
+
+  console.log("📅 BOOKING:", iso);
 
   await fetch('https://services.leadconnectorhq.com/calendars/events', {
     method: 'POST',
@@ -190,8 +245,9 @@ async function createAppointment(contactId, lead) {
     },
     body: JSON.stringify({
       calendarId: CALENDAR_ID,
-      contactId,
-      startTime: iso
+      contactId: lead.ghlId,
+      startTime: iso,
+      title: `Call with ${lead.name || "Client"}`
     })
   });
 }
@@ -211,8 +267,8 @@ function detectDate(text) {
   const d = new Date();
   text = text.toLowerCase();
 
-  if (text.includes("tomorrow")) d.setDate(d.getDate() + 1);
-  else if (text.includes("day after tomorrow")) d.setDate(d.getDate() + 2);
+  if (text.includes("day after tomorrow")) d.setDate(d.getDate() + 2);
+  else if (text.includes("tomorrow")) d.setDate(d.getDate() + 1);
   else return null;
 
   return d;
@@ -229,6 +285,34 @@ function buildDateTime(date, time) {
 
   d.setHours(hour, 0, 0);
   return d.toISOString();
+}
+
+function formatDate(date, time) {
+  return new Date(date).toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric"
+  }) + ` at ${time}`;
+}
+
+function suggestDates() {
+  const today = new Date();
+  let options = [];
+
+  for (let i = 1; i <= 3; i++) {
+    let d = new Date(today);
+    d.setDate(d.getDate() + i);
+
+    options.push(
+      d.toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "short",
+        day: "numeric"
+      }) + " at 2pm"
+    );
+  }
+
+  return options.join("\n");
 }
 
 
@@ -257,6 +341,6 @@ async function sendMessage(contactId, message) {
 
 
 // =============================
-app.listen(3000, () => {
-  console.log("🔥 NO-SILENCE BOT READY");
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🔥 FINAL SALES + BOOKING AI READY");
 });
