@@ -9,14 +9,11 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const conversationHistory = {};
 const leadData = {};
-const timers = {};
 
 app.post('/webhook/ghl-chat', async (req, res) => {
 
   const contactId = req.body.contact_id;
   const message = req.body.message;
-
-  console.log("🔥 WEBHOOK HIT:", JSON.stringify(req.body, null, 2));
 
   res.sendStatus(200);
   if (!contactId) return;
@@ -40,24 +37,26 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
   conversationHistory[contactId].push({ role: 'user', content: userMessage });
 
-  // 🧠 NAME DETECTION (INSTANT + FIXED)
-  const detectedName = extractName(userMessage);
-  if (detectedName) leadData[contactId].name = detectedName;
+  // 🧠 DETECT NAME
+  const name = extractName(userMessage);
+  if (name) leadData[contactId].name = name;
 
   // 🧠 EMAIL
   if (userMessage.includes("@")) {
     leadData[contactId].email = userMessage;
   }
 
-  // 🧠 DATE + TIME
-  const detectedDate = getDateFromText(userMessage);
+  // 🧠 DATE
+  const detectedDate = detectDate(userMessage);
   if (detectedDate) leadData[contactId].booking.date = detectedDate;
 
+  // 🧠 TIME
   const match = userMessage.match(/\d{1,2}\s?(am|pm)/i);
   if (match) leadData[contactId].booking.time = match[0];
 
-  // 🎯 FLOW (HUMANIZED)
   let reply;
+
+  // 🎯 FLOW
 
   if (leadData[contactId].stage === "ask_name") {
     reply = "Hi 😊 how are you today? May I know your name?";
@@ -66,39 +65,72 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
   else if (leadData[contactId].stage === "get_name") {
     if (leadData[contactId].name) {
-      leadData[contactId].stage = "qualify";
-      reply = `Nice to meet you, ${leadData[contactId].name} 😊 What are you currently working on or trying to improve?`;
+      leadData[contactId].stage = "ask_email";
+      reply = `Nice to meet you, ${leadData[contactId].name} 😊 What's your email so I can send details?`;
     } else {
       reply = "Sorry I didn’t catch your name 😊";
     }
   }
 
-  else {
-    // 🤖 HUMAN SALES AI
-    reply = await generateHumanReply(contactId);
+  else if (leadData[contactId].stage === "ask_email") {
+    if (leadData[contactId].email) {
+      leadData[contactId].stage = "ask_goal";
+      reply = "Perfect 😊 What are you currently trying to improve?";
+    } else {
+      reply = "Could you share your email? 😊";
+    }
   }
 
-  // 📅 FIX DATE TEXT OUTPUT
-  if (leadData[contactId].booking.date && leadData[contactId].booking.time) {
-    const formatted = formatBookingDate(
+  else if (leadData[contactId].stage === "ask_goal") {
+    leadData[contactId].stage = "assist";
+
+    reply = await generateReply(contactId);
+
+    // 🔥 Suggest booking naturally
+    reply += "\n\nIf you want, I can set up a quick call and walk you through it 😊";
+  }
+
+  else {
+    reply = await generateReply(contactId);
+  }
+
+  // 🔥 DATE SUGGESTION (NEW FEATURE)
+  if (detectedDate && !leadData[contactId].booking.time) {
+    const suggestions = suggestDates();
+
+    reply += `\n\nI have availability on:\n${suggestions}`;
+  }
+
+  // 🔥 FINAL BOOKING CONFIRMATION
+  if (
+    leadData[contactId].booking.date &&
+    leadData[contactId].booking.time &&
+    leadData[contactId].email &&
+    !leadData[contactId].booking.saved
+  ) {
+    leadData[contactId].booking.saved = true;
+
+    const formatted = formatDate(
       leadData[contactId].booking.date,
       leadData[contactId].booking.time
     );
 
-    reply = reply.replace(/\[DATE_TIME\]/g, formatted);
+    reply = `Perfect 😊 you're booked for ${formatted}.
+
+I'll send the confirmation to your email. Looking forward to speaking with you!`;
+
+    await saveBooking(contactId);
   }
 
-  // 🚀 SEND FAST RESPONSE
-  await sendGHLMessage(contactId, reply);
+  await sendMessage(contactId, reply);
   conversationHistory[contactId].push({ role: 'assistant', content: reply });
 
-  // ⚡ BACKGROUND TASKS
   processAsync(contactId);
 });
 
 
-// 🧠 HUMAN SALES RESPONSE (CONTROLLED)
-async function generateHumanReply(contactId) {
+// 🤖 HUMAN REPLY
+async function generateReply(contactId) {
   const history = conversationHistory[contactId];
 
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -112,37 +144,13 @@ async function generateHumanReply(contactId) {
       messages: [
         {
           role: 'system',
-          content: `You are Lhyn, a friendly human assistant.
+          content: `You are Lhyn, a human assistant.
 
-IMPORTANT:
-- Talk like a real person
-- Never sound robotic
-- Never sound scripted
-- Keep replies short (2–3 sentences max)
-
-STYLE:
-- Warm
-- Natural
-- Conversational
-
-SALES BEHAVIOR:
-- Help first
+- Be helpful and natural
+- Answer clearly
 - Suggest solutions
-- Do NOT push booking too early
-- Only suggest call when needed
-
-EXAMPLE:
-
-User: "How much?"
-You:
-"It really depends on what you're trying to achieve 😊
-
-Some clients focus on getting more leads, others on automating their workflow.
-
-What are you mainly trying to improve right now?"
-
-If booking happens:
-"Perfect 😊 I'll set that up for [DATE_TIME]. Looking forward to speaking with you!"`
+- Give estimates if asked
+- Do NOT push booking too early`
         },
         ...history
       ]
@@ -150,53 +158,12 @@ If booking happens:
   });
 
   const data = await res.json();
-  return data?.choices?.[0]?.message?.content || "Got it 😊 let me help you.";
+  return data?.choices?.[0]?.message?.content || "Got it 😊";
 }
 
 
-// 🚀 BACKGROUND TASKS
-async function processAsync(contactId) {
-  const lead = leadData[contactId];
-
-  if (lead.email && !lead.ghlId) {
-    const id = await createContact(lead);
-    if (id) lead.ghlId = id;
-  }
-
-  await updateContact(contactId, lead);
-
-  if (lead.booking.date && lead.booking.time && !lead.booking.saved) {
-    lead.booking.saved = true;
-    await saveBookingToGHL(contactId);
-  }
-}
-
-
-// 🧠 NAME FIXED
-function extractName(text) {
-  const clean = text.trim();
-
-  if (!clean.includes("@") && clean.split(" ").length === 1) {
-    return clean;
-  }
-
-  const patterns = [
-    /my name is (.+)/i,
-    /i am (.+)/i,
-    /i'm (.+)/i
-  ];
-
-  for (let p of patterns) {
-    const m = clean.match(p);
-    if (m && m[1]) return m[1].split(" ")[0];
-  }
-
-  return null;
-}
-
-
-// 🧠 DATE
-function getDateFromText(text) {
+// 🧠 DATE DETECTION
+function detectDate(text) {
   const today = new Date();
   text = text.toLowerCase();
 
@@ -210,8 +177,8 @@ function getDateFromText(text) {
 }
 
 
-// 📅 FORMAT DATE
-function formatBookingDate(date, time) {
+// 🧠 DATE FORMAT
+function formatDate(date, time) {
   return new Date(date).toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
@@ -220,7 +187,60 @@ function formatBookingDate(date, time) {
 }
 
 
-// 🔥 CREATE CONTACT
+// 🧠 SUGGEST MULTIPLE DATES
+function suggestDates() {
+  const today = new Date();
+
+  let options = [];
+
+  for (let i = 1; i <= 3; i++) {
+    let d = new Date(today);
+    d.setDate(d.getDate() + i);
+
+    options.push(
+      d.toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "short",
+        day: "numeric"
+      }) + " at 2pm"
+    );
+  }
+
+  return options.join("\n");
+}
+
+
+// 🧠 NAME
+function extractName(text) {
+  const clean = text.trim();
+
+  if (!clean.includes("@") && clean.split(" ").length === 1) return clean;
+
+  const patterns = [/my name is (.+)/i, /i am (.+)/i, /i'm (.+)/i];
+
+  for (let p of patterns) {
+    const m = clean.match(p);
+    if (m) return m[1].split(" ")[0];
+  }
+
+  return null;
+}
+
+
+// 🔥 BACKGROUND
+async function processAsync(contactId) {
+  const lead = leadData[contactId];
+
+  if (lead.email && !lead.ghlId) {
+    const id = await createContact(lead);
+    if (id) lead.ghlId = id;
+  }
+
+  await updateContact(contactId, lead);
+}
+
+
+// 🔥 CONTACT
 async function createContact(lead) {
   const res = await fetch('https://services.leadconnectorhq.com/contacts/', {
     method: 'POST',
@@ -239,12 +259,8 @@ async function createContact(lead) {
   return data.contact?.id;
 }
 
-
-// 🔥 UPDATE CONTACT
 async function updateContact(contactId, lead) {
-  const id = lead.ghlId || contactId;
-
-  await fetch(`https://services.leadconnectorhq.com/contacts/${id}`, {
+  await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${GHL_API_KEY}`,
@@ -263,8 +279,8 @@ async function updateContact(contactId, lead) {
 }
 
 
-// 🔥 TAG TRIGGER
-async function saveBookingToGHL(contactId) {
+// 🔥 TAG
+async function saveBooking(contactId) {
   await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, {
     method: 'PUT',
     headers: {
@@ -279,8 +295,8 @@ async function saveBookingToGHL(contactId) {
 }
 
 
-// 📤 SEND MESSAGE
-async function sendGHLMessage(contactId, message) {
+// 📤 SEND
+async function sendMessage(contactId, message) {
   await fetch('https://services.leadconnectorhq.com/conversations/messages', {
     method: 'POST',
     headers: {
@@ -297,5 +313,5 @@ async function sendGHLMessage(contactId, message) {
 }
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 FINAL HUMAN AI SALES READY");
+  console.log("🔥 SMART DATE SYSTEM READY");
 });
