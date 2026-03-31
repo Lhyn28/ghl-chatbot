@@ -41,7 +41,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     content: userMessage
   });
 
-  // 🔥 NAME DETECTION (SMART)
+  // 🔥 NAME EXTRACTION
   const detectedName = extractName(userMessage);
   if (!leadData[contactId].name && detectedName) {
     leadData[contactId].name = detectedName;
@@ -52,18 +52,16 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     leadData[contactId].email = userMessage;
 
     const newId = await createContact(leadData[contactId]);
-    if (newId) {
-      leadData[contactId].ghlId = newId;
-    }
+    if (newId) leadData[contactId].ghlId = newId;
   }
 
-  // 🔥 DATE DETECTION
+  // 🔥 DATE
   const detectedDate = getDateFromText(userMessage);
   if (detectedDate) {
     leadData[contactId].booking.date = detectedDate;
   }
 
-  // 🔥 TIME DETECTION
+  // 🔥 TIME
   if (!leadData[contactId].booking.time) {
     const match = userMessage.match(/\d{1,2}\s?(am|pm)/i);
     if (match) {
@@ -71,7 +69,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     }
   }
 
-  // 🔥 SAVE BOOKING + FORCE WORKFLOW TRIGGER
+  // 🔥 SAVE BOOKING + TRIGGER WORKFLOW
   if (
     leadData[contactId].booking.date &&
     leadData[contactId].booking.time &&
@@ -96,7 +94,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 });
 
 
-// 🧠 NAME EXTRACTOR
+// 🧠 NAME PARSER
 function extractName(text) {
   const lower = text.toLowerCase();
 
@@ -152,11 +150,11 @@ async function callOpenRouter(contactId) {
           role: 'system',
           content: `You are a friendly human assistant named Lhyn.
 
-Never send user to website. Answer directly.
-
-Guide user naturally, ask questions, help them book.
-
-Keep replies short, human, friendly.`
+- Ask for name naturally
+- Ask for email once
+- Help user book a call
+- Answer clearly
+- Be warm, human, not robotic`
         },
         ...history
       ]
@@ -168,7 +166,7 @@ Keep replies short, human, friendly.`
 }
 
 
-// 🔥 CREATE CONTACT (CORRECT FIELD)
+// 🔥 CREATE CONTACT
 async function createContact(lead) {
   try {
     const res = await fetch(`https://services.leadconnectorhq.com/contacts/`, {
@@ -185,7 +183,7 @@ async function createContact(lead) {
     });
 
     const data = await res.json();
-    console.log("✅ CONTACT CREATED:", data);
+    console.log("✅ CONTACT:", data);
 
     return data.contact?.id;
 
@@ -195,7 +193,7 @@ async function createContact(lead) {
 }
 
 
-// 🔥 SAVE BOOKING + FORCE TRIGGER
+// 🔥 SAVE BOOKING (FORCE TRIGGER)
 async function saveBookingToGHL(contactId, lead) {
 
   const id = lead.ghlId || contactId;
@@ -212,13 +210,13 @@ async function saveBookingToGHL(contactId, lead) {
         { key: "booking_date", field_value: lead.booking.date },
         { key: "booking_time", field_value: lead.booking.time }
       ],
-      tags: ["booking_request"] // 🔥 TRIGGER WORKFLOW
+      tags: ["booking_request"]
     })
   });
 }
 
 
-// 📩 EMAIL TRANSCRIPT
+// 📩 EMAIL (YOU)
 async function sendConversationEmail(contactId) {
   const history = conversationHistory[contactId];
   if (!history) return;
@@ -235,8 +233,8 @@ async function sendConversationEmail(contactId) {
     },
     body: JSON.stringify({
       from: "Lhyn <hello@lhynworks.com>",
-      to: ["yourteam@email.com"],
-      subject: "New Chat Lead",
+      to: ["hello@lhynworks.com"],
+      subject: "New AI Lead",
       text: transcript
     })
   });
@@ -276,7 +274,7 @@ function handleFollowUp(contactId) {
   }, 120000);
 
   timers[contactId].second = setTimeout(async () => {
-    await sendGHLMessage(contactId, "No worries if you're busy 😊 I'll close this for now, but feel free to message anytime!");
+    await sendGHLMessage(contactId, "No worries if you're busy 😊 I'll close this for now, feel free to come back anytime!");
     await sendConversationEmail(contactId);
     delete timers[contactId];
   }, 300000);
@@ -284,5 +282,5 @@ function handleFollowUp(contactId) {
 
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 Lhyn AI Assistant FULL SYSTEM READY");
+  console.log("🔥 Lhyn AI Assistant FULLY LIVE");
 });
