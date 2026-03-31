@@ -120,6 +120,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   const emailMatch = userMessage.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
   if (!lead.email && emailMatch) {
     lead.email = emailMatch[0].toLowerCase();
+    lead.stage = 'qualify'; // move to qualify stage right after email
     const newId = await createOrUpdateContact(lead);
     if (newId) lead.ghlId = newId;
   }
@@ -148,18 +149,55 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     await sendEmailSummary(contactId, lead, 'booking');
   }
 
-  // ── BUILD STAGE HINT FOR AI ───────────────────────────────
-  const stageHint = buildStageHint(lead);
-
-  // ── CONVERSATION ──────────────────────────────────────────
+  // ── ADD USER MESSAGE TO HISTORY ──────────────────────────
   conversations[contactId].push({ role: 'user', content: userMessage });
 
-  const aiReply = await callAI(contactId, stageHint);
+  // ── STAGE-BASED REPLY ─────────────────────────────────────
+  let reply = null;
 
-  conversations[contactId].push({ role: 'assistant', content: aiReply });
+  // STAGE: need name
+  if (!lead.name) {
+    reply = `Hi there! 😊 I'm Lhyn. Before anything else, may I know your name?`;
+    lead.stage = 'get_name';
+  }
+
+  // STAGE: have name, need email
+  else if (!lead.email) {
+    // Always greet by name and ask for email
+    reply = `Nice to meet you, ${lead.name}! 😊 Could I get your email address? I'll use it to send you a booking confirmation later.`;
+    lead.stage = 'get_email';
+  }
+
+  // STAGE: have name + email — AI takes over
+  else {
+    // Capture service/problem — but NOT if this message IS the email itself
+    const isEmailMessage = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/.test(userMessage);
+    if (!lead.service && !isEmailMessage && userMessage.length > 5) {
+      const fillers = ['yes','no','ok','okay','sure','thanks','hi','hello','hey','yep','nope'];
+      if (!fillers.includes(userMessage.toLowerCase().trim())) {
+        lead.service = userMessage.slice(0, 200);
+      }
+    }
+
+    // Update stage
+    if (lead.booking.saved) {
+      lead.stage = 'done';
+    } else if (lead.booking.date && lead.booking.time) {
+      lead.stage = 'confirming';
+    } else if (lead.service) {
+      lead.stage = 'booking';
+    } else {
+      lead.stage = 'qualify';
+    }
+
+    const stageHint = buildStageHint(lead);
+    reply = await callAI(contactId, stageHint);
+  }
+
+  conversations[contactId].push({ role: 'assistant', content: reply });
 
   // ── SEND REPLY ────────────────────────────────────────────
-  await sendGHLMessage(contactId, aiReply);
+  await sendGHLMessage(contactId, reply);
 
   // ── RESET FOLLOW-UP TIMER ─────────────────────────────────
   resetFollowUpTimer(contactId, lead);
@@ -180,7 +218,9 @@ async function callAI(contactId, stageHint) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'openai/gpt-4o',
+        model: 'meta-llama/llama-3.3-70b-instruct:free',
+        // 💡 Fallback: if Llama hits rate limits, openrouter/free picks the next best free model
+        // To use the auto-router instead, change model to: 'openrouter/free'
         messages: [
           {
             role: 'system',
@@ -197,7 +237,12 @@ IMPORTANT: Keep your reply SHORT (1-3 sentences). One question at a time. Sound 
     });
 
     const data = await res.json();
-    return data.choices?.[0]?.message?.content?.trim() || "Got it 😊 Let me help you with that!";
+    const aiText = data.choices?.[0]?.message?.content?.trim();
+    if (!aiText) {
+      console.error("Empty AI response. Full response:", JSON.stringify(data));
+      return "Sorry, I didn't catch that 😅 Could you say that again?";
+    }
+    return aiText;
 
   } catch (err) {
     console.error('AI error:', err);
@@ -207,35 +252,33 @@ IMPORTANT: Keep your reply SHORT (1-3 sentences). One question at a time. Sound 
 
 
 // ============================================================
-// STAGE HINTS  (guides the AI without hardcoding replies)
+// STAGE HINTS  (guides AI for qualify → booking → confirm)
 // ============================================================
 function buildStageHint(lead) {
-  if (!lead.name) {
-    return `You just started a new conversation. Greet the visitor warmly and ask for their name. Don't ask anything else yet.`;
+  if (lead.stage === 'qualify') {
+    return `You are talking to ${lead.name} (email: ${lead.email}). 
+You just collected their contact info. Now warmly ask: what problem are they trying to solve, or what kind of help are they looking for? 
+Be genuinely curious. Don't list services yet — let them talk first. One question only.`;
   }
 
-  if (!lead.email) {
-    return `You know the customer's name is ${lead.name}. Ask for their email address so you can send them information and a booking confirmation. Be brief and natural.`;
+  if (lead.stage === 'booking') {
+    return `You are talking to ${lead.name}. They told you: "${lead.service}".
+Based on their problem, briefly explain how LhynWorks can help (1-2 sentences max), then suggest booking a FREE 30-minute discovery call.
+Offer 2-3 time options like: tomorrow at 2pm, Thursday at 10am, or Friday at 3pm.
+Keep it light and easy — no pressure.`;
   }
 
-  if (!lead.service) {
-    return `You have ${lead.name}'s email (${lead.email}). Now ask what problem they're trying to solve or what service they're looking for. Be curious and helpful — not salesy.`;
+  if (lead.stage === 'confirming') {
+    return `${lead.name} has selected ${lead.booking.date} at ${lead.booking.time} for the discovery call.
+Confirm the booking warmly, tell them to check their email for confirmation, and say you're looking forward to chatting. Keep it short and friendly.`;
   }
 
-  if (!lead.booking.date || !lead.booking.time) {
-    return `You've been helping ${lead.name} with their needs around: "${lead.service}". 
-Now gently move toward booking a FREE 30-min discovery call. 
-Suggest they pick a date (mention tomorrow and the next 2-3 days as options) and a preferred time. 
-Make it feel easy and low-pressure.`;
+  if (lead.stage === 'done') {
+    return `The booking is saved. ${lead.name} is all set for ${lead.booking.date} at ${lead.booking.time}.
+If they ask anything else, answer helpfully. Otherwise, give a friendly sign-off.`;
   }
 
-  if (lead.booking.date && lead.booking.time && lead.booking.saved) {
-    return `The booking is confirmed! 
-Date: ${lead.booking.date}, Time: ${lead.booking.time}.
-Give ${lead.name} a warm confirmation, include the date and time, tell them to watch their email for details, and say you're excited to chat. Then wrap up naturally.`;
-  }
-
-  return `Continue the conversation naturally. Help ${lead.name} and guide toward booking a discovery call when the moment is right.`;
+  return `Continue the conversation naturally with ${lead.name}. Answer their questions helpfully using LhynWorks knowledge. Guide toward booking when the moment feels right.`;
 }
 
 
