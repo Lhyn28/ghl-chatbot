@@ -14,6 +14,8 @@ const timers = {};
 
 app.post('/webhook/ghl-chat', async (req, res) => {
 
+  console.log("🔥 WEBHOOK HIT:", JSON.stringify(req.body, null, 2));
+
   const contactId = req.body.contact_id;
   const message = req.body.message;
 
@@ -41,16 +43,19 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     content: userMessage
   });
 
-  // 🔥 NAME EXTRACTION
+  // 🔥 NAME
   const detectedName = extractName(userMessage);
-  if (!leadData[contactId].name && detectedName) {
+  if (detectedName) {
     leadData[contactId].name = detectedName;
   }
 
-  // 🔥 EMAIL + CREATE CONTACT
-  if (!leadData[contactId].email && userMessage.includes("@")) {
+  // 🔥 EMAIL
+  if (userMessage.includes("@")) {
     leadData[contactId].email = userMessage;
+  }
 
+  // 🔥 CREATE CONTACT IF NOT EXIST
+  if (leadData[contactId].email && !leadData[contactId].ghlId) {
     const newId = await createContact(leadData[contactId]);
     if (newId) leadData[contactId].ghlId = newId;
   }
@@ -62,14 +67,15 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   }
 
   // 🔥 TIME
-  if (!leadData[contactId].booking.time) {
-    const match = userMessage.match(/\d{1,2}\s?(am|pm)/i);
-    if (match) {
-      leadData[contactId].booking.time = match[0];
-    }
+  const match = userMessage.match(/\d{1,2}\s?(am|pm)/i);
+  if (match) {
+    leadData[contactId].booking.time = match[0];
   }
 
-  // 🔥 SAVE BOOKING + TRIGGER WORKFLOW
+  // 🔥 ALWAYS UPDATE CONTACT (KEY FIX)
+  await updateContact(contactId, leadData[contactId]);
+
+  // 🔥 SAVE BOOKING + TAG (TRIGGER WORKFLOW)
   if (
     leadData[contactId].booking.date &&
     leadData[contactId].booking.time &&
@@ -77,11 +83,22 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   ) {
     leadData[contactId].booking.saved = true;
 
+    console.log("🔥 SAVING BOOKING...");
     await saveBookingToGHL(contactId, leadData[contactId]);
     await sendConversationEmail(contactId);
   }
 
-  const aiReply = await callOpenRouter(contactId);
+  // 🤖 AI SAFE RESPONSE
+  let aiReply = "Thanks for your message 😊 Let me help you.";
+
+  try {
+    const response = await callOpenRouter(contactId);
+    if (response && response.trim() !== "") {
+      aiReply = response;
+    }
+  } catch (err) {
+    console.log("❌ AI ERROR:", err);
+  }
 
   conversationHistory[contactId].push({
     role: 'assistant',
@@ -94,7 +111,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 });
 
 
-// 🧠 NAME PARSER
+// 🧠 NAME EXTRACTOR
 function extractName(text) {
   const lower = text.toLowerCase();
 
@@ -150,11 +167,7 @@ async function callOpenRouter(contactId) {
           role: 'system',
           content: `You are a friendly human assistant named Lhyn.
 
-- Ask for name naturally
-- Ask for email once
-- Help user book a call
-- Answer clearly
-- Be warm, human, not robotic`
+Answer questions clearly, help users, guide them to booking naturally.`
         },
         ...history
       ]
@@ -162,7 +175,7 @@ async function callOpenRouter(contactId) {
   });
 
   const data = await response.json();
-  return data.choices?.[0]?.message?.content || "Sorry, something went wrong.";
+  return data?.choices?.[0]?.message?.content || null;
 }
 
 
@@ -183,7 +196,7 @@ async function createContact(lead) {
     });
 
     const data = await res.json();
-    console.log("✅ CONTACT:", data);
+    console.log("✅ CONTACT CREATED:", data);
 
     return data.contact?.id;
 
@@ -193,7 +206,33 @@ async function createContact(lead) {
 }
 
 
-// 🔥 SAVE BOOKING (FORCE TRIGGER)
+// 🔥 UPDATE CONTACT (KEY FIX)
+async function updateContact(contactId, lead) {
+
+  const id = lead.ghlId || contactId;
+
+  await fetch(`https://services.leadconnectorhq.com/contacts/${id}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${GHL_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Version': '2021-04-15'
+    },
+    body: JSON.stringify({
+      firstName: lead.name || "Guest",
+      email: lead.email,
+      customFields: [
+        { key: "booking_date", field_value: lead.booking.date },
+        { key: "booking_time", field_value: lead.booking.time }
+      ]
+    })
+  });
+
+  console.log("✅ CONTACT UPDATED");
+}
+
+
+// 🔥 SAVE BOOKING + TAG
 async function saveBookingToGHL(contactId, lead) {
 
   const id = lead.ghlId || contactId;
@@ -206,17 +245,13 @@ async function saveBookingToGHL(contactId, lead) {
       'Version': '2021-04-15'
     },
     body: JSON.stringify({
-      customFields: [
-        { key: "booking_date", field_value: lead.booking.date },
-        { key: "booking_time", field_value: lead.booking.time }
-      ],
       tags: ["booking_request"]
     })
   });
 }
 
 
-// 📩 EMAIL (YOU)
+// 📩 EMAIL
 async function sendConversationEmail(contactId) {
   const history = conversationHistory[contactId];
   if (!history) return;
@@ -259,7 +294,7 @@ async function sendGHLMessage(contactId, message) {
 }
 
 
-// ⏱ FOLLOW-UPS (FIXED)
+// ⏱ FOLLOW UPS
 function handleFollowUp(contactId) {
 
   if (timers[contactId]) {
@@ -282,5 +317,5 @@ function handleFollowUp(contactId) {
 
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 Lhyn AI Assistant FULLY LIVE");
+  console.log("🔥 Lhyn AI Assistant FULLY FIXED");
 });
