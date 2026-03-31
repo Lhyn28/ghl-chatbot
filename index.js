@@ -61,6 +61,7 @@ Your job:
   });
 
   const data = await response.json();
+  console.log("OPENROUTER RESPONSE:", data);
   return data.choices[0].message.content;
 }
 
