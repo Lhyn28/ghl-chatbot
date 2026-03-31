@@ -7,76 +7,52 @@ app.use(express.json());
 // ============================================================
 // ENV
 // ============================================================
-const GHL_API_KEY      = process.env.GHL_API_KEY;
+const GHL_API_KEY        = process.env.GHL_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const RESEND_API_KEY   = process.env.RESEND_API_KEY;
-const CALENDAR_ID      = process.env.CALENDAR_ID;
-const NOTIFY_EMAIL     = process.env.NOTIFY_EMAIL || 'yourteam@lhynworks.com';
+const RESEND_API_KEY     = process.env.RESEND_API_KEY;
+const CALENDAR_ID        = process.env.CALENDAR_ID;
+const NOTIFY_EMAIL       = process.env.NOTIFY_EMAIL || 'yourteam@lhynworks.com';
 
 // ============================================================
-// IN-MEMORY STORES
+// STATE
 // ============================================================
-const conversations = {}; // { contactId: [{ role, content }] }
-const leads         = {};  // { contactId: LeadData }
-const timers        = {};  // { contactId: { t1, t2 } }
+const leads     = {};  // { contactId: LeadObject }
+const convos    = {};  // { contactId: [{role, content}] }
+const timers    = {};  // { contactId: {t1, t2} }
+const processing = {}; // { contactId: boolean } — prevents double firing
 
 // ============================================================
-// LHYN'S KNOWLEDGE BASE
-// ✏️  UPDATE THIS SECTION with your real services & details
+// LHYNWORKS KNOWLEDGE
+// ✏️ Update this with your real info
 // ============================================================
-const LHYN_KNOWLEDGE = `
-You are Lhyn, a friendly and confident sales assistant for LhynWorks — a digital agency that helps businesses grow online.
+const KNOWLEDGE = `
+You are Lhyn, a warm and confident sales assistant for LhynWorks — a Filipino-led digital agency.
 
-== ABOUT LHYNWORKS ==
-LhynWorks is a Filipino-led freelance & digital agency offering:
-1. GoHighLevel (GHL) Setup & Automation
-   - Full CRM setup, pipelines, workflows, automations
-   - Snapshot builds and sub-account management
-   - Chat bots, follow-up sequences, lead capture funnels
-2. AI Chatbot Development
-   - Custom AI assistants for websites & CRMs
-   - Sales bots, support bots, booking bots
-3. Funnel & Website Design
-   - High-converting landing pages
-   - Portfolio & business websites
-   - Booking & lead-gen pages
-4. Social Media & Content Strategy
-   - Content planning, captions, brand voice
-5. Bookkeeping & Admin Virtual Assistance
-   - Financial tracking, invoicing, reporting
+SERVICES:
+- GHL (GoHighLevel) Setup & Automation: CRM, pipelines, workflows, chatbots, funnels — starts at $297
+- AI Chatbot Development: custom bots for websites/CRMs — starts at $197
+- Funnel & Website Design: landing pages, portfolio sites — starts at $297
+- Social Media & Content Strategy: content plans, captions, brand voice
+- Bookkeeping & Admin VA: financial tracking, invoicing, reporting
 
-== PRICING GUIDE ==
-- GHL Setup: starts at $297 one-time or $97/mo retainer
-- AI Chatbot: starts at $197
-- Funnel/Website: starts at $297
-- Full-package bundles available — book a call to get a custom quote
+PROBLEMS WE SOLVE:
+- Losing leads → GHL automation + AI bot
+- Website not converting → Funnel redesign
+- No content ideas → Content strategy
+- Need a booking bot → AI Chatbot + GHL
+- Money tracking mess → Bookkeeping VA
 
-== TYPICAL PROBLEMS WE SOLVE ==
-- "I'm losing leads because nobody follows up fast enough" → GHL automation + AI bot
-- "My website looks outdated or doesn't convert" → Funnel/Website redesign
-- "I don't know what to post on social media" → Content strategy
-- "I need a chatbot that actually books appointments" → AI Chatbot with GHL integration
-- "I have no idea where my money is going" → Bookkeeping VA
+BOOKING: Free 30-minute discovery call. No credit card. No pressure.
 
-== HOW BOOKING WORKS ==
-- We do a FREE 30-minute discovery call
-- You pick a date and time that works for you
-- After we confirm, you'll get an email summary
-
-== YOUR PERSONALITY ==
-- Warm, human, conversational — like texting a smart friend
-- NEVER robotic, NEVER salesy-sounding
-- Short replies: 1-3 sentences max
-- Use light emojis occasionally 😊
-- Ask one question at a time
-- If you don't know something specific, say: "Great question! Let me check that — but the best way is to hop on a quick call so I can give you the exact answer."
-
-== SALES RULES ==
-- Always move the conversation toward a booking
-- If they show interest in any service → propose a free discovery call
-- If they give objections (too expensive, not sure yet) → acknowledge and offer the call as low-risk
-- Never ghost a question — always answer then guide forward
-`;
+PERSONALITY:
+- Text like a smart friend, not a robot
+- MAX 2 sentences per reply
+- One question at a time
+- Light emojis occasionally 😊
+- Never ask about timezone — just confirm the date and time they pick
+- Never say "as an AI" or "I cannot"
+- If unsure about something specific, say "let's talk about that on the call!"
+`.trim();
 
 // ============================================================
 // WEBHOOK
@@ -85,158 +61,192 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   res.sendStatus(200);
 
   const contactId = req.body.contact_id;
-  const rawMessage = req.body.message;
+  const rawMsg    = req.body.message;
 
   if (!contactId) return;
 
-  const userMessage = typeof rawMessage === 'string'
-    ? rawMessage.trim()
-    : (rawMessage?.body || '').trim();
-
-  if (!userMessage) return;
-
-  // Init lead + conversation
-  if (!leads[contactId]) {
-    leads[contactId] = {
-      name:    null,
-      email:   null,
-      ghlId:   contactId,
-      service: null,
-      stage:   'greet',         // greet → name → email → qualify → book → done
-      booking: { date: null, time: null, saved: false }
-    };
-    conversations[contactId] = [];
+  // ── PREVENT DOUBLE PROCESSING ─────────────────────────────
+  if (processing[contactId]) {
+    console.log(`⚠️ Already processing for ${contactId}, skipping`);
+    return;
   }
+  processing[contactId] = true;
 
-  const lead = leads[contactId];
+  try {
+    const userMsg = (typeof rawMsg === 'string' ? rawMsg : rawMsg?.body || '').trim();
+    if (!userMsg) return;
 
-  // ── EXTRACT NAME ──────────────────────────────────────────
-  const hadNameBefore = !!lead.name;
-  if (!lead.name) {
-    const n = extractName(userMessage);
-    if (n) lead.name = n;
-  }
-  const justGotName = !hadNameBefore && !!lead.name;
+    // ── INIT LEAD ──────────────────────────────────────────
+    if (!leads[contactId]) {
+      leads[contactId] = {
+        name:    null,
+        email:   null,
+        ghlId:   contactId,
+        service: null,
+        stage:   'need_name',
+        booking: { date: null, time: null, saved: false }
+      };
+      convos[contactId] = [];
+    }
 
-  // ── EXTRACT EMAIL ─────────────────────────────────────────
-  const emailMatch = userMessage.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
-  const justGotEmail = !lead.email && !!emailMatch; // true only on the message where email is first given
-  if (justGotEmail) {
-    lead.email = emailMatch[0].toLowerCase();
-    lead.stage = 'qualify';
-    const newId = await createOrUpdateContact(lead);
-    if (newId) lead.ghlId = newId;
-  }
+    const lead = leads[contactId];
+    console.log(`📩 [${contactId}] stage=${lead.stage} msg="${userMsg}"`);
 
-  // ── EXTRACT DATE ──────────────────────────────────────────
-  if (!lead.booking.date) {
-    const d = extractDate(userMessage);
-    if (d) lead.booking.date = d;
-  }
-
-  // ── EXTRACT TIME ──────────────────────────────────────────
-  if (!lead.booking.time) {
-    const t = extractTime(userMessage);
-    if (t) lead.booking.time = t;
-  }
-
-  // ── SAVE BOOKING ──────────────────────────────────────────
-  if (
-    lead.booking.date &&
-    lead.booking.time &&
-    lead.email &&
-    !lead.booking.saved
-  ) {
-    lead.booking.saved = true;
-    await saveBookingToGHL(lead);
-    await sendEmailSummary(contactId, lead, 'booking');
-  }
-
-  // ── ADD USER MESSAGE TO HISTORY ──────────────────────────
-  conversations[contactId].push({ role: 'user', content: userMessage });
-
-  // ── STAGE-BASED REPLY ─────────────────────────────────────
-  let reply = null;
-
-  // STAGE: need name (no name yet AND name wasn't just given)
-  if (!lead.name && !justGotName) {
-    reply = `Hi there! 😊 I'm Lhyn. Before anything else, may I know your name?`;
-    lead.stage = 'get_name';
-  }
-
-  // STAGE: name was just given this message
-  else if (justGotName && !lead.email) {
-    reply = `Nice to meet you, ${lead.name}! 😊 Could I get your email address? I'll use it to send you a booking confirmation later.`;
-    lead.stage = 'get_email';
-  }
-
-  // STAGE: still waiting for email (name already known from before)
-  else if (!lead.email && !justGotEmail) {
-    reply = `I just need your email address to continue 😊 What is it?`;
-    lead.stage = 'get_email';
-  }
-
-  // STAGE: email was just given this message — hardcode acknowledgement
-  else if (justGotEmail) {
-    reply = `Got it, thanks! 😊 So ${lead.name}, what's been the biggest challenge in your business lately — or is there something specific you're looking to improve?`;
-  }
-
-  // STAGE: have name + email — AI takes over
-  else {
-    // Capture service/problem from their reply (not from the email message itself)
-    if (!lead.service && userMessage.length > 5) {
-      const fillers = ['yes','no','ok','okay','sure','thanks','hi','hello','hey','yep','nope'];
-      if (!fillers.includes(userMessage.toLowerCase().trim())) {
-        lead.service = userMessage.slice(0, 200);
+    // ── EXTRACT DATA ───────────────────────────────────────
+    // Name (only while we still need it)
+    if (!lead.name) {
+      const n = extractName(userMsg);
+      if (n) {
+        lead.name = n;
+        console.log(`✅ Name captured: ${n}`);
       }
     }
 
-    // Update stage
-    if (lead.booking.saved) {
-      lead.stage = 'done';
-    } else if (lead.booking.date && lead.booking.time) {
-      lead.stage = 'confirming';
-    } else if (lead.service) {
-      lead.stage = 'booking';
-    } else {
-      lead.stage = 'qualify';
+    // Email (only while we still need it)
+    if (!lead.email) {
+      const emailFound = userMsg.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+      if (emailFound) {
+        lead.email = emailFound[0].toLowerCase();
+        console.log(`✅ Email captured: ${lead.email}`);
+        // Save to GHL immediately
+        const ghlId = await createContact(lead);
+        if (ghlId) lead.ghlId = ghlId;
+      }
     }
 
-    const stageHint = buildStageHint(lead);
-    reply = await callAI(contactId, stageHint);
+    // Date + time (only in booking stage)
+    if (lead.stage === 'booking' || lead.stage === 'need_time') {
+      if (!lead.booking.date) {
+        const d = extractDate(userMsg);
+        if (d) { lead.booking.date = d; console.log(`✅ Date: ${d}`); }
+      }
+      if (!lead.booking.time) {
+        const t = extractTime(userMsg);
+        if (t) { lead.booking.time = t; console.log(`✅ Time: ${t}`); }
+      }
+    }
+
+    // ── ADVANCE STAGE ──────────────────────────────────────
+    if (lead.stage === 'need_name' && lead.name) {
+      lead.stage = 'need_email';
+    }
+    if (lead.stage === 'need_email' && lead.email) {
+      lead.stage = 'need_service';
+    }
+    if (lead.stage === 'need_service' && lead.service) {
+      lead.stage = 'booking';
+    }
+    if (lead.stage === 'booking' && lead.booking.date && lead.booking.time && !lead.booking.saved) {
+      lead.stage = 'confirming';
+      lead.booking.saved = true;
+      await saveBooking(lead);
+      await sendEmailSummary(contactId, lead);
+    }
+
+    // ── BUILD REPLY ────────────────────────────────────────
+    convos[contactId].push({ role: 'user', content: userMsg });
+    const reply = await buildReply(contactId, lead, userMsg);
+    convos[contactId].push({ role: 'assistant', content: reply });
+
+    // ── SEND ───────────────────────────────────────────────
+    await sendMsg(contactId, reply);
+    resetTimers(contactId, lead);
+
+  } finally {
+    processing[contactId] = false;
   }
-
-  conversations[contactId].push({ role: 'assistant', content: reply });
-
-  // ── SEND REPLY ────────────────────────────────────────────
-  await sendGHLMessage(contactId, reply);
-
-  // ── RESET FOLLOW-UP TIMER ─────────────────────────────────
-  resetFollowUpTimer(contactId, lead);
 });
 
 
 // ============================================================
-// AI CALL — tries primary model, falls back to openrouter/free,
-//           then falls back to a smart hardcoded reply per stage
+// BUILD REPLY — hardcoded for critical stages, AI for sales
 // ============================================================
-async function callAI(contactId, stageHint) {
-  const history = conversations[contactId] || [];
+async function buildReply(contactId, lead, userMsg) {
+  const { stage, name, email, service, booking } = lead;
 
-  const systemPrompt = `${LHYN_KNOWLEDGE}
+  // --- HARDCODED STAGES (never touch AI) ---
 
-== CURRENT STAGE INSTRUCTION ==
-${stageHint}
+  if (stage === 'need_name') {
+    return `Hi there! 😊 I'm Lhyn. May I know your name?`;
+  }
 
-CRITICAL RULES:
-- Reply in 1-3 short sentences MAX
-- Sound like a real human texting, not a robot
-- Ask only ONE question per message
-- Never say "I cannot", "I don't have access", or "as an AI"
-- Always stay in character as Lhyn`;
+  if (stage === 'need_email') {
+    return `Nice to meet you, ${name}! 😊 What's your email so I can send you a confirmation?`;
+  }
+
+  if (stage === 'need_service') {
+    // Email was just given — ask about their problem
+    return `Got it! 😊 So ${name}, what's the biggest challenge you're trying to solve right now?`;
+  }
+
+  if (stage === 'confirming') {
+    return `You're all set, ${name}! 📅 ${booking.date} at ${booking.time} — I'll send the details to ${email}. Can't wait to chat! 😊`;
+  }
+
+  if (stage === 'done') {
+    return `You're booked, ${name}! 😊 Check your email for details. Feel free to message anytime!`;
+  }
+
+  // --- AI STAGE: booking (qualify + push to book) ---
+  if (stage === 'booking' || stage === 'need_time') {
+    // Capture service if not yet stored
+    if (!lead.service) {
+      const fillers = new Set(['yes','no','ok','okay','sure','thanks','yep','nope','hi','hello','hey']);
+      if (!fillers.has(userMsg.toLowerCase().trim()) && userMsg.length > 3) {
+        lead.service = userMsg.slice(0, 200);
+        lead.stage = 'booking';
+      }
+    }
+    return await callAI(contactId, lead);
+  }
+
+  // Fallback for anything else
+  return await callAI(contactId, lead);
+}
+
+
+// ============================================================
+// AI CALL — short, strict, sales-focused
+// ============================================================
+async function callAI(contactId, lead) {
+  const history = convos[contactId] || [];
+
+  // Build a very specific, strict system prompt
+  const today = new Date();
+  const options = [1,2,3].map(i => {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+  });
+
+  let stageInstruction = '';
+
+  if (!lead.service) {
+    stageInstruction = `Ask ${lead.name} what problem they need help with. One short question. That's it.`;
+  } else if (!lead.booking.date || !lead.booking.time) {
+    stageInstruction = `${lead.name} needs help with: "${lead.service}". 
+In ONE sentence, acknowledge and say you can help.
+Then offer these exact time slots: ${options[0]} at 2pm, ${options[1]} at 10am, or ${options[2]} at 3pm.
+Ask which one works. Nothing else. Do NOT ask for timezone.`;
+  } else {
+    stageInstruction = `Continue helping ${lead.name}. Keep it under 2 sentences.`;
+  }
+
+  const systemPrompt = `${KNOWLEDGE}
+
+RIGHT NOW YOUR ONLY JOB:
+${stageInstruction}
+
+STRICT RULES — NO EXCEPTIONS:
+- Maximum 2 sentences total. If you write more, you fail.
+- Do NOT ask for timezone
+- Do NOT ask multiple questions
+- Do NOT explain yourself
+- Sound like a human text message`;
 
   const models = [
     'meta-llama/llama-3.3-70b-instruct:free',
+    'mistralai/mistral-7b-instruct:free',
     'openrouter/free'
   ];
 
@@ -248,319 +258,152 @@ CRITICAL RULES:
           Authorization: `Bearer ${OPENROUTER_API_KEY}`,
           'Content-Type': 'application/json',
           'HTTP-Referer': 'https://portfolio.lhynworks.com',
-          'X-Title': 'Lhyn Sales Bot'
+          'X-Title': 'LhynWorks Bot'
         },
         body: JSON.stringify({
           model,
-          max_tokens: 200,
-          temperature: 0.7,
+          max_tokens: 80,       // very short — forces brief replies
+          temperature: 0.5,
           messages: [
             { role: 'system', content: systemPrompt },
-            ...history.slice(-10) // last 10 messages to avoid token overflow
+            ...history.slice(-6) // only last 6 messages
           ]
         })
       });
 
       const data = await res.json();
-      const aiText = data.choices?.[0]?.message?.content?.trim();
+      const text = data.choices?.[0]?.message?.content?.trim();
 
-      if (aiText) {
-        console.log(`✅ AI reply from ${model}`);
-        return aiText;
+      if (text) {
+        console.log(`✅ AI (${model}): ${text}`);
+        return text;
       }
 
-      console.warn(`⚠️ Empty response from ${model}:`, JSON.stringify(data));
+      console.warn(`⚠️ Empty from ${model}:`, JSON.stringify(data).slice(0, 200));
 
     } catch (err) {
-      console.error(`❌ AI error with ${model}:`, err.message);
+      console.error(`❌ ${model} error:`, err.message);
     }
   }
 
-  // Both models failed — use smart hardcoded fallback per stage
-  return getSmartFallback(contactId);
+  // All AI models failed — hardcoded smart fallback
+  return hardcodedFallback(lead);
 }
 
-// Smart fallback — never shows a confusing error message
-function getSmartFallback(contactId) {
-  const lead = leads[contactId];
-  if (!lead) return "I'm here to help! 😊 What are you looking to improve in your business?";
-
-  if (lead.stage === 'qualify') {
-    return `Got it! 😊 What's the main thing you're struggling with right now — is it getting leads, converting them, or something else?`;
-  }
-  if (lead.stage === 'booking') {
-    return `That's exactly what we can help with! 😊 Want to hop on a quick FREE 30-min call so we can map out a solution for you? I can slot you in tomorrow at 2pm, Thursday at 10am, or Friday at 3pm — which works?`;
-  }
-  if (lead.stage === 'confirming') {
-    return `You're all booked! 😊 Check your email for the confirmation. Can't wait to chat with you, ${lead.name || 'there'}!`;
-  }
-  if (lead.stage === 'done') {
-    return `You're all set, ${lead.name || 'there'}! 😊 Feel free to message anytime if you have more questions.`;
-  }
-  return `Happy to help! 😊 Tell me a bit more about what you're working on.`;
-}
-
-
-// ============================================================
-// STAGE HINTS  (guides AI for qualify → booking → confirm)
-// ============================================================
-function buildStageHint(lead) {
-  if (lead.stage === 'qualify') {
-    return `You are talking to ${lead.name} (email: ${lead.email}). 
-You just collected their contact info. Now warmly ask: what problem are they trying to solve, or what kind of help are they looking for? 
-Be genuinely curious. Don't list services yet — let them talk first. One question only.`;
-  }
-
-  if (lead.stage === 'booking') {
-    return `You are talking to ${lead.name}. They told you: "${lead.service}".
-Based on their problem, briefly explain how LhynWorks can help (1-2 sentences max), then suggest booking a FREE 30-minute discovery call.
-Offer 2-3 time options like: tomorrow at 2pm, Thursday at 10am, or Friday at 3pm.
-Keep it light and easy — no pressure.`;
-  }
-
-  if (lead.stage === 'confirming') {
-    return `${lead.name} has selected ${lead.booking.date} at ${lead.booking.time} for the discovery call.
-Confirm the booking warmly, tell them to check their email for confirmation, and say you're looking forward to chatting. Keep it short and friendly.`;
-  }
-
-  if (lead.stage === 'done') {
-    return `The booking is saved. ${lead.name} is all set for ${lead.booking.date} at ${lead.booking.time}.
-If they ask anything else, answer helpfully. Otherwise, give a friendly sign-off.`;
-  }
-
-  return `Continue the conversation naturally with ${lead.name}. Answer their questions helpfully using LhynWorks knowledge. Guide toward booking when the moment feels right.`;
-}
-
-
-// ============================================================
-// HELPERS — EXTRACTION
-// ============================================================
-function extractName(text) {
-  const patterns = [
-    /my name is ([A-Za-z]+)/i,
-    /i(?:'m| am) ([A-Za-z]+)/i,
-    /call me ([A-Za-z]+)/i
-  ];
-
-  for (const p of patterns) {
-    const m = text.match(p);
-    if (m) return capitalize(m[1]);
-  }
-
-  // Single word that isn't a common filler
-  const fillers = ['hi','hello','hey','ok','yes','no','sure','thanks','okay','yep','nope','good','fine'];
-  const words = text.trim().split(/\s+/);
-  if (words.length === 1 && !fillers.includes(words[0].toLowerCase()) && !text.includes('@')) {
-    return capitalize(words[0]);
-  }
-
-  return null;
-}
-
-function extractDate(text) {
-  const t = text.toLowerCase();
+function hardcodedFallback(lead) {
   const today = new Date();
-
-  const weekdays = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-
-  if (t.includes('day after tomorrow')) {
-    return formatDateLabel(addDays(today, 2));
-  }
-  if (t.includes('tomorrow')) {
-    return formatDateLabel(addDays(today, 1));
-  }
-  if (t.includes('today')) {
-    return formatDateLabel(today);
-  }
-
-  // "this monday", "next friday", etc.
-  for (let i = 0; i < weekdays.length; i++) {
-    if (t.includes(weekdays[i])) {
-      const d = nextWeekday(i);
-      return formatDateLabel(d);
-    }
-  }
-
-  // "June 5", "June 5th", "5 June"
-  const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december'];
-  for (let mi = 0; mi < monthNames.length; mi++) {
-    if (t.includes(monthNames[mi])) {
-      const dayMatch = t.match(/(\d{1,2})/);
-      if (dayMatch) {
-        const d = new Date(today.getFullYear(), mi, parseInt(dayMatch[1]));
-        if (d < today) d.setFullYear(d.getFullYear() + 1);
-        return formatDateLabel(d);
-      }
-    }
-  }
-
-  return null;
-}
-
-function extractTime(text) {
-  // Matches: 2pm, 2 pm, 2:30pm, 14:00, etc.
-  const match = text.match(/\b(\d{1,2})(?::(\d{2}))?\s?(am|pm)\b/i);
-  if (match) {
-    const hour = match[1];
-    const min  = match[2] ? `:${match[2]}` : '';
-    const ampm = match[3].toLowerCase();
-    return `${hour}${min}${ampm}`;
-  }
-
-  // 24-hour: 14:00
-  const milMatch = text.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
-  if (milMatch) {
-    let h = parseInt(milMatch[1]);
-    const ampm = h >= 12 ? 'pm' : 'am';
-    if (h > 12) h -= 12;
-    return `${h}:${milMatch[2]}${ampm}`;
-  }
-
-  return null;
-}
-
-function capitalize(s) {
-  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
-}
-
-function addDays(date, n) {
-  const d = new Date(date);
-  d.setDate(d.getDate() + n);
-  return d;
-}
-
-function nextWeekday(targetDay) {
-  const today = new Date();
-  const current = today.getDay();
-  let diff = targetDay - current;
-  if (diff <= 0) diff += 7;
-  return addDays(today, diff);
-}
-
-function formatDateLabel(date) {
-  return date.toLocaleDateString('en-US', {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric'
+  const slots = [1,2,3].map(i => {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
   });
-}
 
-function buildISO(dateLabel, timeStr) {
-  // Parse dateLabel back to Date then apply time
-  const base = new Date(dateLabel);
-  const match = timeStr.match(/(\d{1,2})(?::(\d{2}))?(am|pm)/i);
-  if (!match) return base.toISOString();
-
-  let h = parseInt(match[1]);
-  const min = match[2] ? parseInt(match[2]) : 0;
-  const ampm = match[3].toLowerCase();
-
-  if (ampm === 'pm' && h !== 12) h += 12;
-  if (ampm === 'am' && h === 12) h = 0;
-
-  base.setHours(h, min, 0, 0);
-  return base.toISOString();
+  if (!lead.service) {
+    return `What's the main thing you're trying to fix or improve right now? 😊`;
+  }
+  if (!lead.booking.date || !lead.booking.time) {
+    return `We can definitely help with that! 😊 Does ${slots[0]} at 2pm, ${slots[1]} at 10am, or ${slots[2]} at 3pm work for a quick call?`;
+  }
+  return `Awesome, you're all set! 😊 Check your email for the details.`;
 }
 
 
 // ============================================================
-// GHL — CREATE / UPDATE CONTACT
+// GHL — CREATE CONTACT
 // ============================================================
-async function createOrUpdateContact(lead) {
+async function createContact(lead) {
   if (!GHL_API_KEY) {
-    console.error('❌ GHL_API_KEY is missing! Check your environment variables.');
+    console.error('❌ GHL_API_KEY not set!');
     return null;
   }
 
-  try {
-    console.log(`📤 Creating GHL contact: ${lead.name} <${lead.email}>`);
+  const body = {
+    firstName: lead.name || 'Guest',
+    email:     lead.email,
+    tags:      ['chatbot-lead']
+  };
 
-    const res = await fetch('https://services.leadconnectorhq.com/contacts/', {
-      method: 'POST',
+  console.log(`📤 GHL createContact:`, body);
+
+  try {
+    const res  = await fetch('https://services.leadconnectorhq.com/contacts/', {
+      method:  'POST',
       headers: {
         Authorization: `Bearer ${GHL_API_KEY}`,
         'Content-Type': 'application/json',
-        Version: '2021-04-15'
+        Version:        '2021-04-15'
       },
-      body: JSON.stringify({
-        firstName: lead.name || 'Guest',
-        email: lead.email,
-        tags: ['chatbot-lead']
-      })
+      body: JSON.stringify(body)
     });
 
-    const raw = await res.text();
-    console.log(`📥 GHL response (${res.status}):`, raw);
+    const text = await res.text();
+    console.log(`📥 GHL response (${res.status}):`, text.slice(0, 300));
 
-    const data = JSON.parse(raw);
+    const data = JSON.parse(text);
+    const id   = data?.contact?.id || data?.id || null;
 
-    // GHL returns contact.id on create, or contact.id inside contact on duplicate
-    const contactId = data?.contact?.id || data?.id || null;
-    if (contactId) {
-      console.log('✅ GHL Contact ID:', contactId);
-    } else {
-      console.warn('⚠️ No contact ID returned. Full response:', raw);
-    }
-    return contactId;
+    if (id) console.log(`✅ GHL Contact created: ${id}`);
+    else    console.warn(`⚠️ No ID in GHL response`);
+
+    return id;
 
   } catch (err) {
-    console.error('❌ GHL Contact error:', err.message);
+    console.error('❌ GHL createContact error:', err.message);
     return null;
   }
 }
 
 
 // ============================================================
-// GHL — SAVE BOOKING (Calendar Event + Custom Fields)
+// GHL — SAVE BOOKING
 // ============================================================
-async function saveBookingToGHL(lead) {
+async function saveBooking(lead) {
   const id = lead.ghlId;
+  if (!id || !GHL_API_KEY) return;
 
-  // 1. Update custom fields on the contact
+  // Update contact custom fields
   try {
     await fetch(`https://services.leadconnectorhq.com/contacts/${id}`, {
-      method: 'PUT',
+      method:  'PUT',
       headers: {
         Authorization: `Bearer ${GHL_API_KEY}`,
         'Content-Type': 'application/json',
-        Version: '2021-04-15'
+        Version:        '2021-04-15'
       },
       body: JSON.stringify({
         customFields: [
-          { key: 'booking_date', field_value: lead.booking.date },
-          { key: 'booking_time', field_value: lead.booking.time },
-          { key: 'service_interest', field_value: lead.service || 'Not specified' }
+          { key: 'booking_date',     field_value: lead.booking.date  },
+          { key: 'booking_time',     field_value: lead.booking.time  },
+          { key: 'service_interest', field_value: lead.service || '' }
         ]
       })
     });
+    console.log('✅ GHL contact updated with booking');
   } catch (err) {
-    console.error('❌ Custom fields error:', err);
+    console.error('❌ GHL update error:', err.message);
   }
 
-  // 2. Create calendar appointment
+  // Create calendar event
   if (CALENDAR_ID) {
     try {
-      const isoStart = buildISO(lead.booking.date, lead.booking.time);
-
+      const iso = buildISO(lead.booking.date, lead.booking.time);
       await fetch('https://services.leadconnectorhq.com/calendars/events', {
-        method: 'POST',
+        method:  'POST',
         headers: {
           Authorization: `Bearer ${GHL_API_KEY}`,
           'Content-Type': 'application/json',
-          Version: '2021-04-15'
+          Version:        '2021-04-15'
         },
         body: JSON.stringify({
           calendarId: CALENDAR_ID,
           contactId:  id,
-          startTime:  isoStart,
+          startTime:  iso,
           title:      `Discovery Call — ${lead.name}`
         })
       });
-
-      console.log('✅ Calendar event created');
+      console.log('✅ GHL Calendar event created');
     } catch (err) {
-      console.error('❌ Calendar error:', err);
+      console.error('❌ Calendar error:', err.message);
     }
   }
 }
@@ -569,23 +412,20 @@ async function saveBookingToGHL(lead) {
 // ============================================================
 // GHL — SEND MESSAGE
 // ============================================================
-async function sendGHLMessage(contactId, message) {
+async function sendMsg(contactId, message) {
+  if (!GHL_API_KEY) return;
   try {
     await fetch('https://services.leadconnectorhq.com/conversations/messages', {
-      method: 'POST',
+      method:  'POST',
       headers: {
         Authorization: `Bearer ${GHL_API_KEY}`,
         'Content-Type': 'application/json',
-        Version: '2021-04-15'
+        Version:        '2021-04-15'
       },
-      body: JSON.stringify({
-        type: 'Live_Chat',
-        contactId,
-        message
-      })
+      body: JSON.stringify({ type: 'Live_Chat', contactId, message })
     });
   } catch (err) {
-    console.error('❌ Send message error:', err);
+    console.error('❌ sendMsg error:', err.message);
   }
 }
 
@@ -593,33 +433,17 @@ async function sendGHLMessage(contactId, message) {
 // ============================================================
 // RESEND — EMAIL SUMMARY
 // ============================================================
-async function sendEmailSummary(contactId, lead, reason = 'booking') {
-  const history = conversations[contactId] || [];
+async function sendEmailSummary(contactId, lead) {
+  if (!RESEND_API_KEY) return;
 
+  const history   = convos[contactId] || [];
   const transcript = history.map(m =>
-    `${m.role === 'user' ? '👤 Customer' : '🤖 Lhyn'}: ${m.content}`
+    `${m.role === 'user' ? '👤' : '🤖'} ${m.content}`
   ).join('\n\n');
-
-  const subject = reason === 'booking'
-    ? `📅 New Booking — ${lead.name} (${lead.booking.date} at ${lead.booking.time})`
-    : `💬 Chat Ended — ${lead.name || 'Unknown'}`;
-
-  const body = `
-Name:    ${lead.name || 'Unknown'}
-Email:   ${lead.email || 'Not provided'}
-Service: ${lead.service || 'Not specified'}
-Date:    ${lead.booking.date || 'Not booked'}
-Time:    ${lead.booking.time || 'Not booked'}
-
-──────────────────────────────
-CONVERSATION TRANSCRIPT
-──────────────────────────────
-${transcript}
-  `.trim();
 
   try {
     await fetch('https://api.resend.com/emails', {
-      method: 'POST',
+      method:  'POST',
       headers: {
         Authorization: `Bearer ${RESEND_API_KEY}`,
         'Content-Type': 'application/json'
@@ -627,14 +451,13 @@ ${transcript}
       body: JSON.stringify({
         from:    'Lhyn <hello@lhynworks.com>',
         to:      [NOTIFY_EMAIL],
-        subject,
-        text:    body
+        subject: `📅 New Booking — ${lead.name} | ${lead.booking.date} at ${lead.booking.time}`,
+        text:    `Name: ${lead.name}\nEmail: ${lead.email}\nService: ${lead.service}\nDate: ${lead.booking.date}\nTime: ${lead.booking.time}\n\n---\n\n${transcript}`
       })
     });
-
-    console.log('✅ Email sent:', subject);
+    console.log('✅ Email sent');
   } catch (err) {
-    console.error('❌ Email error:', err);
+    console.error('❌ Resend error:', err.message);
   }
 }
 
@@ -642,40 +465,136 @@ ${transcript}
 // ============================================================
 // FOLLOW-UP TIMERS
 // ============================================================
-function resetFollowUpTimer(contactId, lead) {
-  // Clear existing timers
+function resetTimers(contactId, lead) {
   if (timers[contactId]) {
     clearTimeout(timers[contactId].t1);
     clearTimeout(timers[contactId].t2);
   }
-
   timers[contactId] = {};
 
-  // 2-min check-in
-  timers[contactId].t1 = setTimeout(async () => {
-    const name = lead.name ? `, ${lead.name}` : '';
-    await sendGHLMessage(
-      contactId,
-      `Hey${name} 😊 just checking — still there? Take your time, no rush!`
-    );
+  // 2 min: check-in
+  timers[contactId].t1 = setTimeout(() => {
+    sendMsg(contactId, `Hey ${lead.name || 'there'} 😊 still around? No rush!`);
   }, 2 * 60 * 1000);
 
-  // 5-min close
+  // 5 min: close chat
   timers[contactId].t2 = setTimeout(async () => {
-    const name = lead.name ? ` ${lead.name}` : '';
-    await sendGHLMessage(
-      contactId,
-      `No worries${name} 😊 I'll go ahead and close this chat for now. Feel free to message anytime — I'm always here to help! Have a great day! 🌟`
-    );
-
-    // Send transcript email when chat closes
-    await sendEmailSummary(contactId, lead, 'closed');
-
-    // Clean up
+    await sendMsg(contactId, `No worries ${lead.name || ''} 😊 I'll close this for now — feel free to message anytime! Have a great day! 🌟`);
+    if (!lead.booking.saved) await sendEmailSummary(contactId, lead);
     delete timers[contactId];
-    delete conversations[contactId];
+    delete convos[contactId];
     delete leads[contactId];
   }, 5 * 60 * 1000);
+}
+
+
+// ============================================================
+// HELPERS
+// ============================================================
+function extractName(text) {
+  // Pattern matches
+  const patterns = [
+    /my name is ([A-Za-z]+)/i,
+    /i(?:'m| am) ([A-Za-z]+)/i,
+    /call me ([A-Za-z]+)/i,
+    /this is ([A-Za-z]+)/i,
+    /it'?s ([A-Za-z]+)/i
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) return cap(m[1]);
+  }
+  // Single word fallback
+  const fillers = new Set(['hi','hello','hey','ok','yes','no','sure','thanks','okay',
+    'yep','nope','good','fine','great','nice','cool']);
+  const words = text.trim().split(/\s+/);
+  if (words.length === 1 && !fillers.has(words[0].toLowerCase()) && !text.includes('@')) {
+    return cap(words[0]);
+  }
+  return null;
+}
+
+function extractDate(text) {
+  const t    = text.toLowerCase();
+  const today = new Date();
+  const days  = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+  const months = ['january','february','march','april','may','june',
+                  'july','august','september','october','november','december'];
+
+  if (t.includes('day after tomorrow')) return fmtDate(addDays(today, 2));
+  if (t.includes('tomorrow'))           return fmtDate(addDays(today, 1));
+  if (t.includes('today'))              return fmtDate(today);
+
+  for (let i = 0; i < days.length; i++) {
+    if (t.includes(days[i])) return fmtDate(nextWeekday(i));
+  }
+  for (let mi = 0; mi < months.length; mi++) {
+    if (t.includes(months[mi])) {
+      const dm = t.match(/(\d{1,2})/);
+      if (dm) {
+        const d = new Date(today.getFullYear(), mi, parseInt(dm[1]));
+        if (d < today) d.setFullYear(d.getFullYear() + 1);
+        return fmtDate(d);
+      }
+    }
+  }
+  return null;
+}
+
+function extractTime(text) {
+  const m = text.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+  if (m) {
+    const h    = m[1];
+    const min  = m[2] ? `:${m[2]}` : '';
+    const ampm = m[3].toLowerCase();
+    return `${h}${min}${ampm}`;
+  }
+  // 24h format
+  const m2 = text.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+  if (m2) {
+    let h = parseInt(m2[1]);
+    const ampm = h >= 12 ? 'pm' : 'am';
+    if (h > 12) h -= 12;
+    if (h === 0) h = 12;
+    return `${h}:${m2[2]}${ampm}`;
+  }
+  return null;
+}
+
+function buildISO(dateLabel, timeStr) {
+  const base  = new Date(dateLabel);
+  const match = timeStr.match(/(\d{1,2})(?::(\d{2}))?(am|pm)/i);
+  if (!match) return base.toISOString();
+  let h       = parseInt(match[1]);
+  const min   = match[2] ? parseInt(match[2]) : 0;
+  const ampm  = match[3].toLowerCase();
+  if (ampm === 'pm' && h !== 12) h += 12;
+  if (ampm === 'am' && h === 12) h = 0;
+  base.setHours(h, min, 0, 0);
+  return base.toISOString();
+}
+
+function addDays(date, n) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
+  return d;
+}
+
+function nextWeekday(target) {
+  const today = new Date();
+  let diff = target - today.getDay();
+  if (diff <= 0) diff += 7;
+  return addDays(today, diff);
+}
+
+function fmtDate(date) {
+  return date.toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
+  });
+}
+
+function cap(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
 }
 
 
@@ -684,10 +603,10 @@ function resetFollowUpTimer(contactId, lead) {
 // ============================================================
 app.listen(process.env.PORT || 3000, () => {
   console.log('🔥 Lhyn AI Sales Bot — READY');
-  console.log('🔑 ENV CHECK:');
-  console.log('  GHL_API_KEY:        ', GHL_API_KEY       ? '✅ set' : '❌ MISSING');
-  console.log('  OPENROUTER_API_KEY: ', OPENROUTER_API_KEY ? '✅ set' : '❌ MISSING');
-  console.log('  RESEND_API_KEY:     ', RESEND_API_KEY     ? '✅ set' : '❌ MISSING');
-  console.log('  CALENDAR_ID:        ', CALENDAR_ID        ? '✅ set' : '⚠️  not set (optional)');
+  console.log('ENV CHECK:');
+  console.log('  GHL_API_KEY:        ', GHL_API_KEY        ? '✅' : '❌ MISSING');
+  console.log('  OPENROUTER_API_KEY: ', OPENROUTER_API_KEY  ? '✅' : '❌ MISSING');
+  console.log('  RESEND_API_KEY:     ', RESEND_API_KEY      ? '✅' : '⚠️  optional');
+  console.log('  CALENDAR_ID:        ', CALENDAR_ID         ? '✅' : '⚠️  optional');
   console.log('  NOTIFY_EMAIL:       ', NOTIFY_EMAIL);
 });
