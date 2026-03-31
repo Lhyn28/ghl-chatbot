@@ -114,8 +114,19 @@ app.post('/webhook/ghl-chat', async (req, res) => {
       }
     }
 
-    // Date + time (only in booking stage)
-    if (lead.stage === 'booking' || lead.stage === 'need_time') {
+    // Service/problem — capture as soon as we're in need_service stage
+    if (lead.stage === 'need_service' && !lead.service) {
+      const fillers = new Set(['yes','no','ok','okay','sure','thanks','yep','nope',
+                               'hi','hello','hey','good','fine','great','cool']);
+      const clean = userMsg.toLowerCase().trim();
+      if (!fillers.has(clean) && userMsg.length > 3) {
+        lead.service = userMsg.slice(0, 300);
+        console.log(`✅ Service captured: ${lead.service}`);
+      }
+    }
+
+    // Date + time — capture in booking stage OR if they mention it anytime after need_service
+    if ((lead.stage === 'booking' || lead.stage === 'need_service') && lead.service) {
       if (!lead.booking.date) {
         const d = extractDate(userMsg);
         if (d) { lead.booking.date = d; console.log(`✅ Date: ${d}`); }
@@ -134,7 +145,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
       lead.stage = 'need_service';
     }
     if (lead.stage === 'need_service' && lead.service) {
-      lead.stage = 'booking';
+      lead.stage = 'booking';  // ← now this actually triggers because service is set above
     }
     if (lead.stage === 'booking' && lead.booking.date && lead.booking.time && !lead.booking.saved) {
       lead.stage = 'confirming';
@@ -187,20 +198,12 @@ async function buildReply(contactId, lead, userMsg) {
     return `You're booked, ${name}! 😊 Check your email for details. Feel free to message anytime!`;
   }
 
-  // --- AI STAGE: booking (qualify + push to book) ---
-  if (stage === 'booking' || stage === 'need_time') {
-    // Capture service if not yet stored
-    if (!lead.service) {
-      const fillers = new Set(['yes','no','ok','okay','sure','thanks','yep','nope','hi','hello','hey']);
-      if (!fillers.has(userMsg.toLowerCase().trim()) && userMsg.length > 3) {
-        lead.service = userMsg.slice(0, 200);
-        lead.stage = 'booking';
-      }
-    }
+  // --- AI STAGE: booking — AI answers their problem + pushes to schedule ---
+  if (stage === 'booking') {
     return await callAI(contactId, lead);
   }
 
-  // Fallback for anything else
+  // Fallback
   return await callAI(contactId, lead);
 }
 
