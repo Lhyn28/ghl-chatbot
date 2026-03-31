@@ -4,8 +4,8 @@ import fetch from 'node-fetch';
 const app = express();
 app.use(express.json());
 
-const GHL_API_KEY = process.env.pit-d1e079d0-0927-45e7-b9eb-6c3747ec4037;
-const OPENROUTER_API_KEY = process.env.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;
+const GHL_API_KEY = process.env.GHL_API_KEY;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const conversationHistory = {};
 
@@ -38,7 +38,7 @@ async function callOpenRouter(conversationId, contactName) {
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${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}`,
+      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -50,12 +50,10 @@ async function callOpenRouter(conversationId, contactName) {
 The customer's name is ${contactName || 'there'}.
 
 Your job:
-- Greet them warmly on the first message
-- Answer any support or product questions clearly
-- Qualify leads by asking about their budget, timeline, and needs
-- If they want to book an appointment, collect their preferred date, time, and email
-- Keep all replies short: 2 to 4 sentences only
-- If you do not know something, say you will have someone follow up shortly`
+- Greet them warmly
+- Answer clearly
+- Keep replies short (2–4 sentences)
+- Ask helpful follow-up questions`
         },
         ...history
       ]
@@ -70,7 +68,7 @@ async function sendGHLMessage(conversationId, message) {
   await fetch('https://services.leadconnectorhq.com/conversations/messages', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${pit-d1e079d0-0927-45e7-b9eb-6c3747ec4037}`,
+      'Authorization': `Bearer ${GHL_API_KEY}`,
       'Content-Type': 'application/json',
       'Version': '2021-04-15'
     },
@@ -83,5 +81,5 @@ async function sendGHLMessage(conversationId, message) {
 }
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log('GHL Chatbot server is running');
+  console.log('AI chatbot server running 🔥');
 });
