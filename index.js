@@ -6,6 +6,7 @@ app.use(express.json());
 
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const CALENDAR_ID = process.env.CALENDAR_ID;
 
 const conversationHistory = {};
 const leadData = {};
@@ -46,13 +47,12 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     leadData[contactId].email = userMessage;
   }
 
-  // 🧠 DATE
-  const detectedDate = detectDate(userMessage);
-  if (detectedDate) leadData[contactId].booking.date = detectedDate;
+  // 🧠 DATE + TIME
+  const date = detectDate(userMessage);
+  if (date) leadData[contactId].booking.date = date;
 
-  // 🧠 TIME
-  const match = userMessage.match(/\d{1,2}\s?(am|pm)/i);
-  if (match) leadData[contactId].booking.time = match[0];
+  const timeMatch = userMessage.match(/\d{1,2}\s?(am|pm)/i);
+  if (timeMatch) leadData[contactId].booking.time = timeMatch[0];
 
   let reply;
 
@@ -75,7 +75,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   else if (leadData[contactId].stage === "ask_email") {
     if (leadData[contactId].email) {
       leadData[contactId].stage = "ask_goal";
-      reply = "Perfect 😊 What are you currently trying to improve?";
+      reply = "Perfect 😊 What are you trying to improve or achieve?";
     } else {
       reply = "Could you share your email? 😊";
     }
@@ -86,22 +86,14 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
     reply = await generateReply(contactId);
 
-    // 🔥 Suggest booking naturally
-    reply += "\n\nIf you want, I can set up a quick call and walk you through it 😊";
+    reply += "\n\nIf you want, we can go through it on a quick call 😊";
   }
 
   else {
     reply = await generateReply(contactId);
   }
 
-  // 🔥 DATE SUGGESTION (NEW FEATURE)
-  if (detectedDate && !leadData[contactId].booking.time) {
-    const suggestions = suggestDates();
-
-    reply += `\n\nI have availability on:\n${suggestions}`;
-  }
-
-  // 🔥 FINAL BOOKING CONFIRMATION
+  // 🔥 FINAL BOOKING (REAL DATE FIX)
   if (
     leadData[contactId].booking.date &&
     leadData[contactId].booking.time &&
@@ -110,16 +102,16 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   ) {
     leadData[contactId].booking.saved = true;
 
+    await createAppointment(contactId, leadData[contactId]);
+
     const formatted = formatDate(
       leadData[contactId].booking.date,
       leadData[contactId].booking.time
     );
 
-    reply = `Perfect 😊 you're booked for ${formatted}.
+    reply = `Perfect 😊 you're booked for ${formatted}. 
 
-I'll send the confirmation to your email. Looking forward to speaking with you!`;
-
-    await saveBooking(contactId);
+I'll send you a confirmation email shortly. Looking forward to speaking with you!`;
   }
 
   await sendMessage(contactId, reply);
@@ -129,7 +121,7 @@ I'll send the confirmation to your email. Looking forward to speaking with you!`
 });
 
 
-// 🤖 HUMAN REPLY
+// 🤖 HUMAN RESPONSE
 async function generateReply(contactId) {
   const history = conversationHistory[contactId];
 
@@ -144,13 +136,13 @@ async function generateReply(contactId) {
       messages: [
         {
           role: 'system',
-          content: `You are Lhyn, a human assistant.
+          content: `You are Lhyn, a friendly human assistant.
 
-- Be helpful and natural
 - Answer clearly
 - Suggest solutions
 - Give estimates if asked
-- Do NOT push booking too early`
+- Be natural, not pushy
+- Keep replies short`
         },
         ...history
       ]
@@ -162,7 +154,60 @@ async function generateReply(contactId) {
 }
 
 
-// 🧠 DATE DETECTION
+// 🧠 BUILD REAL DATETIME
+function buildDateTime(dateObj, timeStr) {
+  const date = new Date(dateObj);
+
+  let [hour, modifier] = timeStr.toLowerCase().split(/(am|pm)/);
+  hour = parseInt(hour.trim());
+
+  if (modifier === "pm" && hour !== 12) hour += 12;
+  if (modifier === "am" && hour === 12) hour = 0;
+
+  date.setHours(hour, 0, 0);
+
+  return date.toISOString();
+}
+
+
+// 🔥 CREATE REAL APPOINTMENT
+async function createAppointment(contactId, lead) {
+
+  const isoTime = buildDateTime(
+    lead.booking.date,
+    lead.booking.time
+  );
+
+  console.log("📅 BOOKING:", isoTime);
+
+  await fetch('https://services.leadconnectorhq.com/calendars/events', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${GHL_API_KEY}`,
+      'Content-Type': 'application/json',
+      Version: '2021-04-15'
+    },
+    body: JSON.stringify({
+      calendarId: CALENDAR_ID,
+      contactId: contactId,
+      startTime: isoTime,
+      title: `Call with ${lead.name || "Client"}`
+    })
+  });
+}
+
+
+// 🧠 FORMAT DATE
+function formatDate(date, time) {
+  return new Date(date).toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric"
+  }) + ` at ${time}`;
+}
+
+
+// 🧠 DATE DETECT
 function detectDate(text) {
   const today = new Date();
   text = text.toLowerCase();
@@ -174,39 +219,6 @@ function detectDate(text) {
   else return null;
 
   return d;
-}
-
-
-// 🧠 DATE FORMAT
-function formatDate(date, time) {
-  return new Date(date).toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric"
-  }) + ` at ${time}`;
-}
-
-
-// 🧠 SUGGEST MULTIPLE DATES
-function suggestDates() {
-  const today = new Date();
-
-  let options = [];
-
-  for (let i = 1; i <= 3; i++) {
-    let d = new Date(today);
-    d.setDate(d.getDate() + i);
-
-    options.push(
-      d.toLocaleDateString("en-US", {
-        weekday: "long",
-        month: "short",
-        day: "numeric"
-      }) + " at 2pm"
-    );
-  }
-
-  return options.join("\n");
 }
 
 
@@ -247,7 +259,7 @@ async function createContact(lead) {
     headers: {
       Authorization: `Bearer ${GHL_API_KEY}`,
       'Content-Type': 'application/json',
-      'Version': '2021-04-15'
+      Version: '2021-04-15'
     },
     body: JSON.stringify({
       firstName: lead.name,
@@ -265,44 +277,24 @@ async function updateContact(contactId, lead) {
     headers: {
       Authorization: `Bearer ${GHL_API_KEY}`,
       'Content-Type': 'application/json',
-      'Version': '2021-04-15'
+      Version: '2021-04-15'
     },
     body: JSON.stringify({
       firstName: lead.name,
-      email: lead.email,
-      customFields: [
-        { key: "booking_date", field_value: lead.booking.date?.toISOString() },
-        { key: "booking_time", field_value: lead.booking.time }
-      ]
+      email: lead.email
     })
   });
 }
 
 
-// 🔥 TAG
-async function saveBooking(contactId) {
-  await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${GHL_API_KEY}`,
-      'Content-Type': 'application/json',
-      'Version': '2021-04-15'
-    },
-    body: JSON.stringify({
-      tags: ["booking_request"]
-    })
-  });
-}
-
-
-// 📤 SEND
+// 📤 SEND MESSAGE
 async function sendMessage(contactId, message) {
   await fetch('https://services.leadconnectorhq.com/conversations/messages', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${GHL_API_KEY}`,
       'Content-Type': 'application/json',
-      'Version': '2021-04-15'
+      Version: '2021-04-15'
     },
     body: JSON.stringify({
       type: 'Live_Chat',
@@ -313,5 +305,5 @@ async function sendMessage(contactId, message) {
 }
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 SMART DATE SYSTEM READY");
+  console.log("🔥 REAL BOOKING SYSTEM LIVE");
 });
