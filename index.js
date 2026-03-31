@@ -172,4 +172,3 @@ async function sendGHLMessage(conversationId, message) {
 app.listen(process.env.PORT || 3000, () => {
   console.log('GHL Chatbot server is running');
 });
-```
