@@ -10,10 +10,18 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const conversationHistory = {};
 
 app.post('/webhook/ghl-chat', async (req, res) => {
-  const { conversation_id, message, contact_name } = req.body;
 
-  // 🔥 DEBUG (so we see incoming data)
+  // 🔥 DEBUG incoming data
   console.log("🔥 WEBHOOK HIT:", JSON.stringify(req.body, null, 2));
+
+  // ✅ FIX: Properly extract conversation_id
+  const conversation_id =
+    req.body.conversation_id ||
+    req.body.workflow?.conversation_id ||
+    req.body.contact_id;
+
+  const message = req.body.message;
+  const contact_name = req.body.contact_name || req.body.full_name;
 
   res.sendStatus(200);
 
@@ -21,13 +29,13 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     conversationHistory[conversation_id] = [];
   }
 
-  // ✅ FIX: Safely handle message (string OR object)
+  // ✅ FIX: Handle message safely
   const userMessage = typeof message === "string"
     ? message
     : message?.body || "";
 
-  // ✅ Only store valid messages
   if (userMessage && userMessage.trim() !== "") {
+
     conversationHistory[conversation_id].push({
       role: 'user',
       content: userMessage
@@ -67,7 +75,6 @@ Your job:
 - Keep replies short (2–4 sentences)
 - Ask helpful follow-up questions`
         },
-        // ✅ FILTER invalid messages
         ...history.filter(msg => msg.content && msg.content.trim() !== "")
       ]
     })
@@ -75,10 +82,8 @@ Your job:
 
   const data = await response.json();
 
-  // 🔥 DEBUG OpenRouter response
   console.log("OPENROUTER RESPONSE:", JSON.stringify(data, null, 2));
 
-  // ✅ Safe fallback
   if (!data.choices || !data.choices[0]) {
     return "Sorry, something went wrong. Please try again.";
   }
@@ -87,6 +92,9 @@ Your job:
 }
 
 async function sendGHLMessage(conversationId, message) {
+
+  console.log("📤 Sending message to GHL:", conversationId, message);
+
   await fetch('https://services.leadconnectorhq.com/conversations/messages', {
     method: 'POST',
     headers: {
