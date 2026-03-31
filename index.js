@@ -61,7 +61,15 @@ Your job:
   });
 
   const data = await response.json();
-  console.log("OPENROUTER RESPONSE:", data);
+
+  // 🔥 DEBUG LOG (IMPORTANT)
+  console.log("OPENROUTER RESPONSE:", JSON.stringify(data, null, 2));
+
+  // ✅ SAFE CHECK (prevents crash)
+  if (!data.choices || !data.choices[0]) {
+    return "Sorry, something went wrong. Please try again.";
+  }
+
   return data.choices[0].message.content;
 }
 
