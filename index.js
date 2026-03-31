@@ -111,16 +111,19 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   const lead = leads[contactId];
 
   // ── EXTRACT NAME ──────────────────────────────────────────
+  const hadNameBefore = !!lead.name;
   if (!lead.name) {
     const n = extractName(userMessage);
     if (n) lead.name = n;
   }
+  const justGotName = !hadNameBefore && !!lead.name;
 
   // ── EXTRACT EMAIL ─────────────────────────────────────────
   const emailMatch = userMessage.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
-  if (!lead.email && emailMatch) {
+  const justGotEmail = !lead.email && !!emailMatch; // true only on the message where email is first given
+  if (justGotEmail) {
     lead.email = emailMatch[0].toLowerCase();
-    lead.stage = 'qualify'; // move to qualify stage right after email
+    lead.stage = 'qualify';
     const newId = await createOrUpdateContact(lead);
     if (newId) lead.ghlId = newId;
   }
@@ -155,24 +158,33 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   // ── STAGE-BASED REPLY ─────────────────────────────────────
   let reply = null;
 
-  // STAGE: need name
-  if (!lead.name) {
+  // STAGE: need name (no name yet AND name wasn't just given)
+  if (!lead.name && !justGotName) {
     reply = `Hi there! 😊 I'm Lhyn. Before anything else, may I know your name?`;
     lead.stage = 'get_name';
   }
 
-  // STAGE: have name, need email
-  else if (!lead.email) {
-    // Always greet by name and ask for email
+  // STAGE: name was just given this message
+  else if (justGotName && !lead.email) {
     reply = `Nice to meet you, ${lead.name}! 😊 Could I get your email address? I'll use it to send you a booking confirmation later.`;
     lead.stage = 'get_email';
   }
 
+  // STAGE: still waiting for email (name already known from before)
+  else if (!lead.email && !justGotEmail) {
+    reply = `I just need your email address to continue 😊 What is it?`;
+    lead.stage = 'get_email';
+  }
+
+  // STAGE: email was just given this message — hardcode acknowledgement
+  else if (justGotEmail) {
+    reply = `Got it, thanks! 😊 So ${lead.name}, what's been the biggest challenge in your business lately — or is there something specific you're looking to improve?`;
+  }
+
   // STAGE: have name + email — AI takes over
   else {
-    // Capture service/problem — but NOT if this message IS the email itself
-    const isEmailMessage = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/.test(userMessage);
-    if (!lead.service && !isEmailMessage && userMessage.length > 5) {
+    // Capture service/problem from their reply (not from the email message itself)
+    if (!lead.service && userMessage.length > 5) {
       const fillers = ['yes','no','ok','okay','sure','thanks','hi','hello','hey','yep','nope'];
       if (!fillers.includes(userMessage.toLowerCase().trim())) {
         lead.service = userMessage.slice(0, 200);
