@@ -6,7 +6,6 @@ app.use(express.json());
 
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
 const conversationHistory = {};
 const leadData = {};
@@ -22,14 +21,15 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   res.sendStatus(200);
   if (!contactId) return;
 
-  if (!conversationHistory[contactId]) {
-    conversationHistory[contactId] = [];
+  if (!leadData[contactId]) {
     leadData[contactId] = {
       name: null,
       email: null,
       ghlId: null,
+      stage: "ask_name",
       booking: { date: null, time: null, saved: false }
     };
+    conversationHistory[contactId] = [];
   }
 
   const userMessage = typeof message === "string"
@@ -38,80 +38,83 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
   if (!userMessage) return;
 
-  conversationHistory[contactId].push({
-    role: 'user',
-    content: userMessage
-  });
+  conversationHistory[contactId].push({ role: 'user', content: userMessage });
 
-  // 🔥 NAME
+  // 🧠 DETECT NAME
   const detectedName = extractName(userMessage);
-  if (detectedName) {
-    leadData[contactId].name = detectedName;
-  }
+  if (detectedName) leadData[contactId].name = detectedName;
 
-  // 🔥 EMAIL
+  // 🧠 DETECT EMAIL
   if (userMessage.includes("@")) {
     leadData[contactId].email = userMessage;
   }
 
-  // 🔥 CREATE CONTACT IF NOT EXIST
+  // 🔥 CREATE CONTACT ON EMAIL
   if (leadData[contactId].email && !leadData[contactId].ghlId) {
     const newId = await createContact(leadData[contactId]);
     if (newId) leadData[contactId].ghlId = newId;
   }
 
-  // 🔥 DATE
-  const detectedDate = getDateFromText(userMessage);
-  if (detectedDate) {
-    leadData[contactId].booking.date = detectedDate;
-  }
-
-  // 🔥 TIME
-  const match = userMessage.match(/\d{1,2}\s?(am|pm)/i);
-  if (match) {
-    leadData[contactId].booking.time = match[0];
-  }
-
-  // 🔥 ALWAYS UPDATE CONTACT (KEY FIX)
+  // 🔥 ALWAYS UPDATE CONTACT
   await updateContact(contactId, leadData[contactId]);
 
-  // 🔥 SAVE BOOKING + TAG (TRIGGER WORKFLOW)
+  // 🧠 DATE + TIME
+  const detectedDate = getDateFromText(userMessage);
+  if (detectedDate) leadData[contactId].booking.date = detectedDate;
+
+  const match = userMessage.match(/\d{1,2}\s?(am|pm)/i);
+  if (match) leadData[contactId].booking.time = match[0];
+
+  // 🔥 SAVE BOOKING
   if (
     leadData[contactId].booking.date &&
     leadData[contactId].booking.time &&
     !leadData[contactId].booking.saved
   ) {
     leadData[contactId].booking.saved = true;
-
-    console.log("🔥 SAVING BOOKING...");
-    await saveBookingToGHL(contactId, leadData[contactId]);
-    await sendConversationEmail(contactId);
+    await saveBookingToGHL(contactId);
   }
 
-  // 🤖 AI SAFE RESPONSE
-  let aiReply = "Thanks for your message 😊 Let me help you.";
+  // 🎯 FLOW CONTROL
+  let reply;
 
-  try {
-    const response = await callOpenRouter(contactId);
-    if (response && response.trim() !== "") {
-      aiReply = response;
+  if (leadData[contactId].stage === "ask_name") {
+    reply = "Hi 😊 may I know your name?";
+    leadData[contactId].stage = "get_name";
+  }
+
+  else if (leadData[contactId].stage === "get_name" && !leadData[contactId].name) {
+    reply = "Sorry I didn’t catch your name 😊";
+  }
+
+  else if (leadData[contactId].stage === "get_name" && leadData[contactId].name) {
+    leadData[contactId].stage = "ask_email";
+    reply = `Nice to meet you, ${leadData[contactId].name} 😊 What's your email so I can send details?`;
+  }
+
+  else if (leadData[contactId].stage === "ask_email" && !leadData[contactId].email) {
+    reply = "Could you share your email? 😊";
+  }
+
+  else {
+    // 🤖 SALES AI MODE
+    try {
+      const ai = await callOpenRouter(contactId);
+      reply = ai || "Got it 😊 let me help you.";
+    } catch {
+      reply = "Sorry 😅 something went wrong — can you try again?";
     }
-  } catch (err) {
-    console.log("❌ AI ERROR:", err);
   }
 
-  conversationHistory[contactId].push({
-    role: 'assistant',
-    content: aiReply
-  });
+  conversationHistory[contactId].push({ role: 'assistant', content: reply });
 
-  await sendGHLMessage(contactId, aiReply);
+  await sendGHLMessage(contactId, reply);
 
   handleFollowUp(contactId);
 });
 
 
-// 🧠 NAME EXTRACTOR
+// 🧠 NAME
 function extractName(text) {
   const lower = text.toLowerCase();
 
@@ -126,21 +129,16 @@ function extractName(text) {
   return null;
 }
 
-
-// 🧠 DATE PARSER
+// 🧠 DATE
 function getDateFromText(text) {
   const today = new Date();
   text = text.toLowerCase();
 
   let d = new Date(today);
 
-  if (text.includes("day after tomorrow")) {
-    d.setDate(d.getDate() + 2);
-  } else if (text.includes("tomorrow")) {
-    d.setDate(d.getDate() + 1);
-  } else {
-    return null;
-  }
+  if (text.includes("day after tomorrow")) d.setDate(d.getDate() + 2);
+  else if (text.includes("tomorrow")) d.setDate(d.getDate() + 1);
+  else return null;
 
   return d.toLocaleDateString("en-US", {
     year: "numeric",
@@ -149,12 +147,11 @@ function getDateFromText(text) {
   });
 }
 
-
-// 🤖 AI
+// 🤖 SALES AI
 async function callOpenRouter(contactId) {
-  const history = conversationHistory[contactId] || [];
+  const history = conversationHistory[contactId];
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${OPENROUTER_API_KEY}`,
@@ -165,50 +162,45 @@ async function callOpenRouter(contactId) {
       messages: [
         {
           role: 'system',
-          content: `You are a friendly human assistant named Lhyn.
+          content: `You are Lhyn, a friendly but confident sales assistant.
 
-Answer questions clearly, help users, guide them to booking naturally.`
+Your goal is to guide users toward booking a call.
+
+- Always answer then guide
+- Never reject clients
+- Always offer help
+- Move toward booking naturally`
         },
         ...history
       ]
     })
   });
 
-  const data = await response.json();
-  return data?.choices?.[0]?.message?.content || null;
+  const data = await res.json();
+  return data?.choices?.[0]?.message?.content;
 }
-
 
 // 🔥 CREATE CONTACT
 async function createContact(lead) {
-  try {
-    const res = await fetch(`https://services.leadconnectorhq.com/contacts/`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${GHL_API_KEY}`,
-        'Content-Type': 'application/json',
-        'Version': '2021-04-15'
-      },
-      body: JSON.stringify({
-        firstName: lead.name || "Guest",
-        email: lead.email
-      })
-    });
+  const res = await fetch('https://services.leadconnectorhq.com/contacts/', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${GHL_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Version': '2021-04-15'
+    },
+    body: JSON.stringify({
+      firstName: lead.name || "Guest",
+      email: lead.email
+    })
+  });
 
-    const data = await res.json();
-    console.log("✅ CONTACT CREATED:", data);
-
-    return data.contact?.id;
-
-  } catch (err) {
-    console.log("❌ CONTACT ERROR:", err);
-  }
+  const data = await res.json();
+  return data.contact?.id;
 }
 
-
-// 🔥 UPDATE CONTACT (KEY FIX)
+// 🔥 UPDATE CONTACT
 async function updateContact(contactId, lead) {
-
   const id = lead.ghlId || contactId;
 
   await fetch(`https://services.leadconnectorhq.com/contacts/${id}`, {
@@ -219,7 +211,7 @@ async function updateContact(contactId, lead) {
       'Version': '2021-04-15'
     },
     body: JSON.stringify({
-      firstName: lead.name || "Guest",
+      firstName: lead.name,
       email: lead.email,
       customFields: [
         { key: "booking_date", field_value: lead.booking.date },
@@ -227,17 +219,11 @@ async function updateContact(contactId, lead) {
       ]
     })
   });
-
-  console.log("✅ CONTACT UPDATED");
 }
 
-
-// 🔥 SAVE BOOKING + TAG
-async function saveBookingToGHL(contactId, lead) {
-
-  const id = lead.ghlId || contactId;
-
-  await fetch(`https://services.leadconnectorhq.com/contacts/${id}`, {
+// 🔥 SAVE BOOKING TAG
+async function saveBookingToGHL(contactId) {
+  await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${GHL_API_KEY}`,
@@ -249,32 +235,6 @@ async function saveBookingToGHL(contactId, lead) {
     })
   });
 }
-
-
-// 📩 EMAIL
-async function sendConversationEmail(contactId) {
-  const history = conversationHistory[contactId];
-  if (!history) return;
-
-  const transcript = history.map(m =>
-    `${m.role.toUpperCase()}: ${m.content}`
-  ).join("\n\n");
-
-  await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${RESEND_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      from: "Lhyn <hello@lhynworks.com>",
-      to: ["hello@lhynworks.com"],
-      subject: "New AI Lead",
-      text: transcript
-    })
-  });
-}
-
 
 // 📤 SEND MESSAGE
 async function sendGHLMessage(contactId, message) {
@@ -293,7 +253,6 @@ async function sendGHLMessage(contactId, message) {
   });
 }
 
-
 // ⏱ FOLLOW UPS
 function handleFollowUp(contactId) {
 
@@ -308,14 +267,12 @@ function handleFollowUp(contactId) {
     sendGHLMessage(contactId, "Hey 😊 just checking — are you still there?");
   }, 120000);
 
-  timers[contactId].second = setTimeout(async () => {
-    await sendGHLMessage(contactId, "No worries if you're busy 😊 I'll close this for now, feel free to come back anytime!");
-    await sendConversationEmail(contactId);
+  timers[contactId].second = setTimeout(() => {
+    sendGHLMessage(contactId, "No worries if you're busy 😊 feel free to come back anytime!");
     delete timers[contactId];
   }, 300000);
 }
 
-
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 Lhyn AI Assistant FULLY FIXED");
+  console.log("🔥 Lhyn AI SALES SYSTEM READY");
 });
