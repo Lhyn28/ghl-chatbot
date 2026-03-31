@@ -24,6 +24,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
       name: null,
       email: null,
       ghlId: contactId,
+      ghlIdCreated: false,
       stage: "ask_name",
       booking: { date: null, time: null, saved: false }
     };
@@ -38,15 +39,16 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
   conversationHistory[contactId].push({ role: 'user', content: userMessage });
 
-  // 🧠 NAME (LOCKED)
+  // 🧠 NAME
   if (!leadData[contactId].name) {
     const name = extractName(userMessage);
     if (name) leadData[contactId].name = name;
   }
 
   // 🧠 EMAIL
-  if (!leadData[contactId].email && userMessage.includes("@")) {
-    leadData[contactId].email = userMessage;
+  if (!leadData[contactId].email) {
+    const email = extractEmail(userMessage);
+    if (email) leadData[contactId].email = email;
   }
 
   // 🧠 DATE
@@ -59,46 +61,73 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
   let reply = "Got it 😊";
 
-  // 🎯 FLOW
   try {
 
+    // FLOW
     if (leadData[contactId].stage === "ask_name") {
-      reply = "Hi 😊 how are you today? May I know your name?";
+      reply = "Hey 😊 welcome! What’s your name?";
       leadData[contactId].stage = "get_name";
     }
 
     else if (leadData[contactId].stage === "get_name") {
       if (leadData[contactId].name) {
         leadData[contactId].stage = "ask_email";
-        reply = `Nice to meet you, ${leadData[contactId].name} 😊 What's your email so I can send details?`;
+        reply = `Nice to meet you, ${leadData[contactId].name} 😊 What’s your email? I’ll send you the details after.`;
       } else {
-        reply = "Sorry I didn’t catch your name 😊";
+        reply = "Sorry I didn’t catch your name 😅";
       }
     }
 
     else if (leadData[contactId].stage === "ask_email") {
       if (leadData[contactId].email) {
         leadData[contactId].stage = "assist";
-        reply = "Perfect 😊 What are you trying to improve?";
+        reply = "Got it! 😊 What are you trying to improve or build?";
       } else {
         reply = "Could you share your email? 😊";
       }
     }
 
-    else {
-      reply = await safeAIReply(contactId);
+    else if (leadData[contactId].stage === "assist") {
+
+      // Missing info check (human-like)
+      if (!leadData[contactId].name) {
+        reply = "By the way 😊 what’s your name?";
+      }
+
+      else if (!leadData[contactId].email) {
+        reply = "Got it 👍 where should I send the details? (your email)";
+      }
+
+      else {
+        reply = await safeAIReply(contactId);
+
+        // Soft booking trigger
+        if (/help|build|funnel|automation|marketing/i.test(userMessage)) {
+          reply += "\n\nIf you want, I can walk you through it on a quick call 😊";
+        }
+
+        // Direct booking intent
+        if (/call|schedule|book|available/i.test(userMessage)) {
+          reply += `\n\nHere are available slots:\n${suggestDates()}\n\nJust tell me what works for you 😊`;
+        }
+      }
     }
 
   } catch (err) {
     console.log("❌ FLOW ERROR:", err);
   }
 
-  // 🔥 HANDLE NOT AVAILABLE
+  // NOT AVAILABLE HANDLER
   if (userMessage.toLowerCase().includes("not available")) {
-    reply = `No problem 😊 Here are other times:\n${suggestDates()}`;
+    reply = `No worries 😊 totally get it.
+
+Here are a few other options:
+${suggestDates()}
+
+Let me know what works best 👍`;
   }
 
-  // 🔥 SUGGEST TIMES
+  // Suggest time if only date
   if (
     leadData[contactId].booking.date &&
     !leadData[contactId].booking.time
@@ -106,15 +135,26 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     reply += `\n\nAvailable times:\n${suggestDates()}`;
   }
 
-  // 🔥 BOOKING
+  // BOOKING (STRICT + SAFE)
   if (
     leadData[contactId].booking.date &&
     leadData[contactId].booking.time &&
     leadData[contactId].email &&
+    leadData[contactId].name &&
     !leadData[contactId].booking.saved
   ) {
     leadData[contactId].booking.saved = true;
 
+    // Ensure contact exists
+    if (!leadData[contactId].ghlIdCreated) {
+      const id = await createContact(leadData[contactId]);
+      if (id) {
+        leadData[contactId].ghlId = id;
+        leadData[contactId].ghlIdCreated = true;
+      }
+    }
+
+    await updateContact(leadData[contactId]);
     await createAppointment(leadData[contactId]);
 
     const formatted = formatDate(
@@ -122,9 +162,12 @@ app.post('/webhook/ghl-chat', async (req, res) => {
       leadData[contactId].booking.time
     );
 
-    reply = `Perfect 😊 you're booked for ${formatted}. 
+    reply = `Perfect 😊 you're booked for ${formatted}. You'll receive a confirmation email shortly!`;
+  }
 
-You'll receive a confirmation email shortly!`;
+  // Prevent loop reset
+  if (reply.toLowerCase().includes("how are you")) {
+    reply = "Got it 😊 tell me more about what you need help with.";
   }
 
   await sendMessage(contactId, reply);
@@ -134,10 +177,11 @@ You'll receive a confirmation email shortly!`;
 });
 
 
-// 🤖 SAFE AI
+// 🤖 AI
 async function safeAIReply(contactId) {
   try {
     const history = conversationHistory[contactId];
+    const lead = leadData[contactId];
 
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -150,7 +194,21 @@ async function safeAIReply(contactId) {
         messages: [
           {
             role: 'system',
-            content: `You are Lhyn, a helpful human assistant. Keep it short and natural.`
+            content: `
+You are Lhyn, a friendly human assistant.
+
+Goal: guide user to book a call.
+
+Style:
+- Natural
+- Not pushy
+- Helpful
+
+Rules:
+- Never reject
+- Never restart conversation
+- Ask questions naturally
+`
           },
           ...history
         ]
@@ -160,14 +218,13 @@ async function safeAIReply(contactId) {
     const data = await res.json();
     return data?.choices?.[0]?.message?.content || "Got it 😊";
 
-  } catch (err) {
-    console.log("❌ AI ERROR:", err);
+  } catch {
     return "Got it 😊 let me help you.";
   }
 }
 
 
-// 🔥 BOOK APPOINTMENT
+// 📅 BOOK
 async function createAppointment(lead) {
   const iso = buildDateTime(lead.booking.date, lead.booking.time);
 
@@ -182,13 +239,39 @@ async function createAppointment(lead) {
       calendarId: CALENDAR_ID,
       contactId: lead.ghlId,
       startTime: iso,
-      title: `Call with ${lead.name || "Client"}`
+      title: `Call with ${lead.name}`
     })
   });
 }
 
 
-// 🧠 DATE
+// 🧠 HELPERS
+
+function extractEmail(text) {
+  const match = text.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/);
+  return match ? match[0] : null;
+}
+
+function extractName(text) {
+  const patterns = [
+    /my name is ([a-zA-Z]+)/i,
+    /i am ([a-zA-Z]+)/i,
+    /i'm ([a-zA-Z]+)/i
+  ];
+
+  for (let p of patterns) {
+    const m = text.match(p);
+    if (m) return m[1];
+  }
+
+  const words = text.trim().split(" ");
+  if (words.length === 1 && words[0].length < 20) {
+    return words[0];
+  }
+
+  return null;
+}
+
 function detectDate(text) {
   const today = new Date();
   text = text.toLowerCase();
@@ -202,8 +285,6 @@ function detectDate(text) {
   return d;
 }
 
-
-// 🧠 TIME BUILD
 function buildDateTime(dateObj, timeStr) {
   const date = new Date(dateObj);
 
@@ -217,8 +298,6 @@ function buildDateTime(dateObj, timeStr) {
   return date.toISOString();
 }
 
-
-// 🧠 FORMAT
 function formatDate(date, time) {
   return new Date(date).toLocaleDateString("en-US", {
     weekday: "long",
@@ -227,8 +306,6 @@ function formatDate(date, time) {
   }) + ` at ${time}`;
 }
 
-
-// 🧠 SUGGEST
 function suggestDates() {
   const today = new Date();
   let options = [];
@@ -250,24 +327,8 @@ function suggestDates() {
 }
 
 
-// 🧠 NAME
-function extractName(text) {
-  const clean = text.trim();
+// 🔥 GHL
 
-  if (!clean.includes("@") && clean.split(" ").length === 1) return clean;
-
-  const patterns = [/my name is (.+)/i, /i am (.+)/i, /i'm (.+)/i];
-
-  for (let p of patterns) {
-    const m = clean.match(p);
-    if (m) return m[1].split(" ")[0];
-  }
-
-  return null;
-}
-
-
-// 🔥 BACKGROUND
 async function processAsync(contactId) {
   const lead = leadData[contactId];
 
@@ -282,8 +343,6 @@ async function processAsync(contactId) {
   await updateContact(lead);
 }
 
-
-// 🔥 CONTACT
 async function createContact(lead) {
   const res = await fetch('https://services.leadconnectorhq.com/contacts/', {
     method: 'POST',
@@ -319,6 +378,7 @@ async function updateContact(lead) {
 
 
 // 📤 SEND
+
 async function sendMessage(contactId, message) {
   await fetch('https://services.leadconnectorhq.com/conversations/messages', {
     method: 'POST',
@@ -336,5 +396,5 @@ async function sendMessage(contactId, message) {
 }
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 FIXED NO-CRASH SYSTEM LIVE");
+  console.log("🔥 SALES + BOOKING CHATBOT LIVE");
 });
