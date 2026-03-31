@@ -41,7 +41,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     content: userMessage
   });
 
-  // 🔥 NAME EXTRACTION
+  // 🔥 NAME DETECTION (SMART)
   const detectedName = extractName(userMessage);
   if (!leadData[contactId].name && detectedName) {
     leadData[contactId].name = detectedName;
@@ -51,8 +51,10 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   if (!leadData[contactId].email && userMessage.includes("@")) {
     leadData[contactId].email = userMessage;
 
-    const newId = await createContactIfNotExists(leadData[contactId]);
-    if (newId) leadData[contactId].ghlId = newId;
+    const newId = await createContact(leadData[contactId]);
+    if (newId) {
+      leadData[contactId].ghlId = newId;
+    }
   }
 
   // 🔥 DATE DETECTION
@@ -69,7 +71,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     }
   }
 
-  // 🔥 SAVE BOOKING + SEND EMAIL
+  // 🔥 SAVE BOOKING + FORCE WORKFLOW TRIGGER
   if (
     leadData[contactId].booking.date &&
     leadData[contactId].booking.time &&
@@ -81,7 +83,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     await sendConversationEmail(contactId);
   }
 
-  const aiReply = await callOpenRouter(contactId, leadData[contactId]);
+  const aiReply = await callOpenRouter(contactId);
 
   conversationHistory[contactId].push({
     role: 'assistant',
@@ -94,7 +96,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 });
 
 
-// 🧠 NAME PARSER
+// 🧠 NAME EXTRACTOR
 function extractName(text) {
   const lower = text.toLowerCase();
 
@@ -134,15 +136,8 @@ function getDateFromText(text) {
 
 
 // 🤖 AI
-async function callOpenRouter(contactId, lead) {
+async function callOpenRouter(contactId) {
   const history = conversationHistory[contactId] || [];
-
-  const hour = new Date().getHours();
-  let greeting = "Hello";
-
-  if (hour < 12) greeting = "Good morning 😊";
-  else if (hour < 18) greeting = "Good afternoon 😊";
-  else greeting = "Good evening 😊";
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -155,23 +150,13 @@ async function callOpenRouter(contactId, lead) {
       messages: [
         {
           role: 'system',
-          content: `${greeting}
+          content: `You are a friendly human assistant named Lhyn.
 
-You are a friendly assistant named Lhyn.
+Never send user to website. Answer directly.
 
-RULES:
-- Never send user to website
-- Answer directly
-- Use real dates
+Guide user naturally, ask questions, help them book.
 
-FLOW:
-- Ask name
-- Ask email once
-- Ask needs
-- Guide booking
-
-STYLE:
-Short, human, natural`
+Keep replies short, human, friendly.`
         },
         ...history
       ]
@@ -183,8 +168,8 @@ Short, human, natural`
 }
 
 
-// 🔥 CREATE CONTACT
-async function createContactIfNotExists(lead) {
+// 🔥 CREATE CONTACT (CORRECT FIELD)
+async function createContact(lead) {
   try {
     const res = await fetch(`https://services.leadconnectorhq.com/contacts/`, {
       method: 'POST',
@@ -200,7 +185,7 @@ async function createContactIfNotExists(lead) {
     });
 
     const data = await res.json();
-    console.log("✅ CONTACT:", data);
+    console.log("✅ CONTACT CREATED:", data);
 
     return data.contact?.id;
 
@@ -210,8 +195,9 @@ async function createContactIfNotExists(lead) {
 }
 
 
-// 📅 SAVE BOOKING
+// 🔥 SAVE BOOKING + FORCE TRIGGER
 async function saveBookingToGHL(contactId, lead) {
+
   const id = lead.ghlId || contactId;
 
   await fetch(`https://services.leadconnectorhq.com/contacts/${id}`, {
@@ -225,7 +211,8 @@ async function saveBookingToGHL(contactId, lead) {
       customFields: [
         { key: "booking_date", field_value: lead.booking.date },
         { key: "booking_time", field_value: lead.booking.time }
-      ]
+      ],
+      tags: ["booking_request"] // 🔥 TRIGGER WORKFLOW
     })
   });
 }
@@ -297,5 +284,5 @@ function handleFollowUp(contactId) {
 
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 Lhyn AI Assistant READY");
+  console.log("🔥 Lhyn AI Assistant FULL SYSTEM READY");
 });
