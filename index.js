@@ -9,15 +9,12 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const CALENDAR_ID = process.env.CALENDAR_ID;
 
 const leadData = {};
-const history = {};
 
 // =============================
 // 🚀 WEBHOOK
 // =============================
 app.post('/webhook/ghl-chat', async (req, res) => {
   res.sendStatus(200);
-
-  console.log("🔥 BODY:", JSON.stringify(req.body));
 
   const contactId = req.body.contact_id;
 
@@ -28,16 +25,8 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     message = req.body.message.body;
   }
 
-  if (!contactId || !message) {
-    console.log("❌ Missing data");
-    return;
-  }
+  if (!contactId || !message) return;
 
-  console.log("📩 USER:", message);
-
-  // =============================
-  // 🧠 INIT USER
-  // =============================
   if (!leadData[contactId]) {
     leadData[contactId] = {
       name: null,
@@ -46,13 +35,12 @@ app.post('/webhook/ghl-chat', async (req, res) => {
       booking: { date: null, time: null, saved: false },
       ghlId: contactId
     };
-    history[contactId] = [];
   }
 
   const lead = leadData[contactId];
 
   // =============================
-  // 🧠 CAPTURE NAME (LOCKED)
+  // 🧠 NAME (FIXED)
   // =============================
   if (!lead.name) {
     const name = extractName(message);
@@ -60,20 +48,20 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   }
 
   // =============================
-  // 🧠 CAPTURE EMAIL
+  // 🧠 EMAIL
   // =============================
   if (!lead.email && message.includes("@")) {
     lead.email = message.trim();
   }
 
   // =============================
-  // 🧠 CAPTURE DATE
+  // 🧠 DATE
   // =============================
   const date = detectDate(message);
   if (date) lead.booking.date = date;
 
   // =============================
-  // 🧠 CAPTURE TIME
+  // 🧠 TIME
   // =============================
   const timeMatch = message.match(/\d{1,2}\s?(am|pm)/i);
   if (timeMatch) lead.booking.time = timeMatch[0];
@@ -83,9 +71,8 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   try {
 
     // =============================
-    // 🎯 STRICT FLOW
+    // 🎯 FLOW
     // =============================
-
     if (lead.stage === "ask_name") {
       reply = "Hi 😊 how are you today? May I know your name?";
       lead.stage = "get_name";
@@ -93,7 +80,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
     else if (lead.stage === "get_name") {
       if (lead.name) {
-        reply = `Nice to meet you, ${lead.name} 😊 What's your email so I can send details?`;
+        reply = `Nice to meet you, ${lead.name} 😊 What's your email?`;
         lead.stage = "get_email";
       } else {
         reply = "Sorry I didn’t catch your name 😊";
@@ -104,7 +91,6 @@ app.post('/webhook/ghl-chat', async (req, res) => {
       if (lead.email) {
         reply = "Perfect 😊 What are you trying to improve?";
         lead.stage = "assist";
-
         await createOrUpdateContact(lead);
       } else {
         reply = "Could you share your email? 😊";
@@ -113,30 +99,34 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
     else {
       reply = await safeAI(message);
-      reply += "\n\nIf you want, we can go through this properly on a quick call 😊";
+
+      // 🔥 SALES PUSH
+      const triggers = ["price","cost","interested","help","service","need","want"];
+      if (triggers.some(w => message.toLowerCase().includes(w))) {
+        reply += `\n\nWe can go over this quickly on a call.\nAvailable times:\n${suggestDates()}`;
+      }
     }
 
   } catch (err) {
-    console.log("❌ FLOW ERROR:", err);
-    reply = "Sorry 😅 something went wrong. Can you try again?";
+    reply = "Sorry 😅 something went wrong. Try again?";
   }
 
   // =============================
-  // 🔥 HANDLE NOT AVAILABLE
+  // 🔥 NOT AVAILABLE HANDLER
   // =============================
   if (message.toLowerCase().includes("not available")) {
     reply = `No problem 😊 Here are other times:\n${suggestDates()}`;
   }
 
   // =============================
-  // 🔥 SUGGEST TIMES
+  // 🔥 SUGGEST IF DATE ONLY
   // =============================
   if (lead.booking.date && !lead.booking.time) {
     reply += `\n\nAvailable times:\n${suggestDates()}`;
   }
 
   // =============================
-  // 🔥 FINAL BOOKING
+  // 🔥 BOOKING
   // =============================
   if (
     lead.booking.date &&
@@ -150,22 +140,25 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
     const formatted = formatDate(lead.booking.date, lead.booking.time);
 
-    reply = `Perfect ${lead.name || ""} 😊 you're booked for ${formatted}. 
+    reply = `You're all set ${lead.name || ""} 😊
+📅 ${formatted}
 
-You'll receive a confirmation email shortly.`;
+Check your email for confirmation.`;
   }
 
   // =============================
-  // 📤 SEND MESSAGE
+  // ✂️ LIMIT LENGTH
   // =============================
-  await sendMessage(contactId, reply);
+  if (reply.length > 200) {
+    reply = reply.slice(0, 200) + "...";
+  }
 
-  console.log("🤖 BOT:", reply);
+  await sendMessage(contactId, reply);
 });
 
 
 // =============================
-// 🤖 SAFE AI (NEVER FAIL)
+// 🤖 AI (SHORT + SALES)
 // =============================
 async function safeAI(message) {
   try {
@@ -180,10 +173,15 @@ async function safeAI(message) {
         messages: [
           {
             role: 'system',
-            content: `You are a confident sales assistant.
-- Answer clearly
-- Suggest solutions
-- Guide toward booking`
+            content: `
+You are Lhyn, a sales assistant.
+
+Rules:
+- Keep replies VERY SHORT (1-2 sentences)
+- Be helpful and confident
+- Guide toward booking
+- No long explanations
+`
           },
           { role: 'user', content: message }
         ]
@@ -193,15 +191,14 @@ async function safeAI(message) {
     const data = await res.json();
     return data?.choices?.[0]?.message?.content || "Got it 😊";
 
-  } catch (err) {
-    console.log("❌ AI ERROR:", err);
-    return "Got it 😊 let me help you.";
+  } catch {
+    return "Got it 😊";
   }
 }
 
 
 // =============================
-// 🔥 CREATE / UPDATE CONTACT
+// 🔥 CONTACT
 // =============================
 async function createOrUpdateContact(lead) {
   try {
@@ -222,19 +219,15 @@ async function createOrUpdateContact(lead) {
     if (data.contact?.id) {
       lead.ghlId = data.contact.id;
     }
-  } catch (err) {
-    console.log("❌ CONTACT ERROR:", err);
-  }
+  } catch {}
 }
 
 
 // =============================
-// 🔥 CREATE APPOINTMENT (REAL)
+// 🔥 BOOK APPOINTMENT
 // =============================
 async function createAppointment(lead) {
   const iso = buildDateTime(lead.booking.date, lead.booking.time);
-
-  console.log("📅 BOOKING:", iso);
 
   await fetch('https://services.leadconnectorhq.com/calendars/events', {
     method: 'POST',
@@ -247,7 +240,7 @@ async function createAppointment(lead) {
       calendarId: CALENDAR_ID,
       contactId: lead.ghlId,
       startTime: iso,
-      title: `Call with ${lead.name || "Client"}`
+      title: `Call with ${lead.name}`
     })
   });
 }
@@ -257,18 +250,33 @@ async function createAppointment(lead) {
 // 🧠 HELPERS
 // =============================
 function extractName(text) {
-  if (text.split(" ").length === 1) return text;
+  const clean = text.toLowerCase().trim();
+
+  const invalid = ["hi","hello","hey","ok","yes","no"];
+  if (invalid.includes(clean)) return null;
+
+  if (!clean.includes("@") && clean.split(" ").length === 1) {
+    return capitalize(clean);
+  }
 
   const match = text.match(/i am (.+)|i'm (.+)|my name is (.+)/i);
-  return match ? match[1] || match[2] || match[3] : null;
+  if (match) {
+    return capitalize((match[1] || match[2] || match[3]).split(" ")[0]);
+  }
+
+  return null;
+}
+
+function capitalize(n) {
+  return n.charAt(0).toUpperCase() + n.slice(1);
 }
 
 function detectDate(text) {
   const d = new Date();
   text = text.toLowerCase();
 
-  if (text.includes("day after tomorrow")) d.setDate(d.getDate() + 2);
-  else if (text.includes("tomorrow")) d.setDate(d.getDate() + 1);
+  if (text.includes("day after tomorrow")) d.setDate(d.getDate()+2);
+  else if (text.includes("tomorrow")) d.setDate(d.getDate()+1);
   else return null;
 
   return d;
@@ -283,41 +291,35 @@ function buildDateTime(date, time) {
   if (mod === "pm" && hour !== 12) hour += 12;
   if (mod === "am" && hour === 12) hour = 0;
 
-  d.setHours(hour, 0, 0);
+  d.setHours(hour,0,0);
   return d.toISOString();
 }
 
 function formatDate(date, time) {
   return new Date(date).toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric"
+    weekday:"long", month:"long", day:"numeric"
   }) + ` at ${time}`;
 }
 
 function suggestDates() {
   const today = new Date();
-  let options = [];
+  let out = [];
 
-  for (let i = 1; i <= 3; i++) {
+  for (let i=1;i<=3;i++) {
     let d = new Date(today);
-    d.setDate(d.getDate() + i);
+    d.setDate(d.getDate()+i);
 
-    options.push(
-      d.toLocaleDateString("en-US", {
-        weekday: "long",
-        month: "short",
-        day: "numeric"
-      }) + " at 2pm"
+    out.push(
+      d.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}) + " at 2pm"
     );
   }
 
-  return options.join("\n");
+  return out.join("\n");
 }
 
 
 // =============================
-// 📤 SEND MESSAGE
+// 📤 SEND
 // =============================
 async function sendMessage(contactId, message) {
   try {
@@ -334,13 +336,11 @@ async function sendMessage(contactId, message) {
         message
       })
     });
-  } catch (err) {
-    console.log("❌ SEND ERROR:", err);
-  }
+  } catch {}
 }
 
 
 // =============================
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 FINAL SALES + BOOKING AI READY");
+  console.log("🔥 FINAL SALES BOT READY");
 });
