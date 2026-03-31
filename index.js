@@ -41,9 +41,10 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     content: userMessage
   });
 
-  // 🔥 NAME
-  if (!leadData[contactId].name && userMessage.length < 30 && !userMessage.includes("@")) {
-    leadData[contactId].name = userMessage;
+  // 🔥 NAME EXTRACTION
+  const detectedName = extractName(userMessage);
+  if (!leadData[contactId].name && detectedName) {
+    leadData[contactId].name = detectedName;
   }
 
   // 🔥 EMAIL + CREATE CONTACT
@@ -54,7 +55,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     if (newId) leadData[contactId].ghlId = newId;
   }
 
-  // 🔥 DATE DETECTION (SMART)
+  // 🔥 DATE DETECTION
   const detectedDate = getDateFromText(userMessage);
   if (detectedDate) {
     leadData[contactId].booking.date = detectedDate;
@@ -68,14 +69,16 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     }
   }
 
-  // 🔥 SAVE BOOKING
+  // 🔥 SAVE BOOKING + SEND EMAIL
   if (
     leadData[contactId].booking.date &&
     leadData[contactId].booking.time &&
     !leadData[contactId].booking.saved
   ) {
     leadData[contactId].booking.saved = true;
+
     await saveBookingToGHL(contactId, leadData[contactId]);
+    await sendConversationEmail(contactId);
   }
 
   const aiReply = await callOpenRouter(contactId, leadData[contactId]);
@@ -89,6 +92,22 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
   handleFollowUp(contactId);
 });
+
+
+// 🧠 NAME PARSER
+function extractName(text) {
+  const lower = text.toLowerCase();
+
+  if (lower.includes("my name is")) return text.split("my name is")[1].trim();
+  if (lower.includes("i am")) return text.split("i am")[1].trim();
+  if (lower.includes("i'm")) return text.split("i'm")[1].trim();
+
+  if (text.split(" ").length === 1 && !text.includes("@")) {
+    return text.trim();
+  }
+
+  return null;
+}
 
 
 // 🧠 DATE PARSER
@@ -138,30 +157,21 @@ async function callOpenRouter(contactId, lead) {
           role: 'system',
           content: `${greeting}
 
-You are a friendly human assistant named Lhyn.
+You are a friendly assistant named Lhyn.
 
-IMPORTANT:
+RULES:
 - Never send user to website
-- Always answer directly
-- Always use real dates (e.g., April 3, 2026)
-
-SERVICES:
-Funnels, automation, AI chatbot, lead generation.
+- Answer directly
+- Use real dates
 
 FLOW:
 - Ask name
 - Ask email once
 - Ask needs
-- Qualify
 - Guide booking
 
-BOOKING:
-- Suggest times
-- Confirm date and time clearly
-- Say you'll handle booking
-
 STYLE:
-Short, warm, natural`
+Short, human, natural`
         },
         ...history
       ]
@@ -169,12 +179,7 @@ Short, warm, natural`
   });
 
   const data = await response.json();
-
-  if (!data.choices || !data.choices[0]) {
-    return "Sorry, something went wrong.";
-  }
-
-  return data.choices[0].message.content;
+  return data.choices?.[0]?.message?.content || "Sorry, something went wrong.";
 }
 
 
@@ -185,15 +190,18 @@ async function createContactIfNotExists(lead) {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${GHL_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Version': '2021-04-15'
       },
       body: JSON.stringify({
-        name: lead.name,
+        firstName: lead.name || "Guest",
         email: lead.email
       })
     });
 
     const data = await res.json();
+    console.log("✅ CONTACT:", data);
+
     return data.contact?.id;
 
   } catch (err) {
@@ -210,7 +218,8 @@ async function saveBookingToGHL(contactId, lead) {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${GHL_API_KEY}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'Version': '2021-04-15'
     },
     body: JSON.stringify({
       customFields: [
@@ -240,7 +249,7 @@ async function sendConversationEmail(contactId) {
     body: JSON.stringify({
       from: "Lhyn <hello@lhynworks.com>",
       to: ["yourteam@email.com"],
-      subject: "New Chat Conversation",
+      subject: "New Chat Lead",
       text: transcript
     })
   });
@@ -254,7 +263,7 @@ async function sendGHLMessage(contactId, message) {
     headers: {
       Authorization: `Bearer ${GHL_API_KEY}`,
       'Content-Type': 'application/json',
-      Version: '2021-04-15'
+      'Version': '2021-04-15'
     },
     body: JSON.stringify({
       type: 'Live_Chat',
@@ -265,22 +274,28 @@ async function sendGHLMessage(contactId, message) {
 }
 
 
-// ⏱ FOLLOW-UPS
+// ⏱ FOLLOW-UPS (FIXED)
 function handleFollowUp(contactId) {
 
-  if (timers[contactId]) clearTimeout(timers[contactId]);
+  if (timers[contactId]) {
+    clearTimeout(timers[contactId].first);
+    clearTimeout(timers[contactId].second);
+  }
 
-  timers[contactId] = setTimeout(() => {
+  timers[contactId] = {};
+
+  timers[contactId].first = setTimeout(() => {
     sendGHLMessage(contactId, "Hey 😊 just checking — are you still there?");
   }, 120000);
 
-  setTimeout(async () => {
+  timers[contactId].second = setTimeout(async () => {
     await sendGHLMessage(contactId, "No worries if you're busy 😊 I'll close this for now, but feel free to message anytime!");
     await sendConversationEmail(contactId);
+    delete timers[contactId];
   }, 300000);
 }
 
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 Lhyn AI Assistant with REAL DATE LOGIC");
+  console.log("🔥 Lhyn AI Assistant READY");
 });
