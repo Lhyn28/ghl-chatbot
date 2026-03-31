@@ -217,49 +217,87 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
 
 // ============================================================
-// AI CALL
+// AI CALL — tries primary model, falls back to openrouter/free,
+//           then falls back to a smart hardcoded reply per stage
 // ============================================================
 async function callAI(contactId, stageHint) {
   const history = conversations[contactId] || [];
 
-  try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'meta-llama/llama-3.3-70b-instruct:free',
-        // 💡 Fallback: if Llama hits rate limits, openrouter/free picks the next best free model
-        // To use the auto-router instead, change model to: 'openrouter/free'
-        messages: [
-          {
-            role: 'system',
-            content: `${LHYN_KNOWLEDGE}
+  const systemPrompt = `${LHYN_KNOWLEDGE}
 
 == CURRENT STAGE INSTRUCTION ==
 ${stageHint}
 
-IMPORTANT: Keep your reply SHORT (1-3 sentences). One question at a time. Sound human.`
-          },
-          ...history
-        ]
-      })
-    });
+CRITICAL RULES:
+- Reply in 1-3 short sentences MAX
+- Sound like a real human texting, not a robot
+- Ask only ONE question per message
+- Never say "I cannot", "I don't have access", or "as an AI"
+- Always stay in character as Lhyn`;
 
-    const data = await res.json();
-    const aiText = data.choices?.[0]?.message?.content?.trim();
-    if (!aiText) {
-      console.error("Empty AI response. Full response:", JSON.stringify(data));
-      return "Sorry, I didn't catch that 😅 Could you say that again?";
+  const models = [
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'openrouter/free'
+  ];
+
+  for (const model of models) {
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://portfolio.lhynworks.com',
+          'X-Title': 'Lhyn Sales Bot'
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 200,
+          temperature: 0.7,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            ...history.slice(-10) // last 10 messages to avoid token overflow
+          ]
+        })
+      });
+
+      const data = await res.json();
+      const aiText = data.choices?.[0]?.message?.content?.trim();
+
+      if (aiText) {
+        console.log(`✅ AI reply from ${model}`);
+        return aiText;
+      }
+
+      console.warn(`⚠️ Empty response from ${model}:`, JSON.stringify(data));
+
+    } catch (err) {
+      console.error(`❌ AI error with ${model}:`, err.message);
     }
-    return aiText;
-
-  } catch (err) {
-    console.error('AI error:', err);
-    return "Sorry, I hit a small glitch 😅 Give me a sec — what were you saying?";
   }
+
+  // Both models failed — use smart hardcoded fallback per stage
+  return getSmartFallback(contactId);
+}
+
+// Smart fallback — never shows a confusing error message
+function getSmartFallback(contactId) {
+  const lead = leads[contactId];
+  if (!lead) return "I'm here to help! 😊 What are you looking to improve in your business?";
+
+  if (lead.stage === 'qualify') {
+    return `Got it! 😊 What's the main thing you're struggling with right now — is it getting leads, converting them, or something else?`;
+  }
+  if (lead.stage === 'booking') {
+    return `That's exactly what we can help with! 😊 Want to hop on a quick FREE 30-min call so we can map out a solution for you? I can slot you in tomorrow at 2pm, Thursday at 10am, or Friday at 3pm — which works?`;
+  }
+  if (lead.stage === 'confirming') {
+    return `You're all booked! 😊 Check your email for the confirmation. Can't wait to chat with you, ${lead.name || 'there'}!`;
+  }
+  if (lead.stage === 'done') {
+    return `You're all set, ${lead.name || 'there'}! 😊 Feel free to message anytime if you have more questions.`;
+  }
+  return `Happy to help! 😊 Tell me a bit more about what you're working on.`;
 }
 
 
@@ -430,7 +468,14 @@ function buildISO(dateLabel, timeStr) {
 // GHL — CREATE / UPDATE CONTACT
 // ============================================================
 async function createOrUpdateContact(lead) {
+  if (!GHL_API_KEY) {
+    console.error('❌ GHL_API_KEY is missing! Check your environment variables.');
+    return null;
+  }
+
   try {
+    console.log(`📤 Creating GHL contact: ${lead.name} <${lead.email}>`);
+
     const res = await fetch('https://services.leadconnectorhq.com/contacts/', {
       method: 'POST',
       headers: {
@@ -440,16 +485,27 @@ async function createOrUpdateContact(lead) {
       },
       body: JSON.stringify({
         firstName: lead.name || 'Guest',
-        email: lead.email
+        email: lead.email,
+        tags: ['chatbot-lead']
       })
     });
 
-    const data = await res.json();
-    console.log('✅ Contact:', data?.contact?.id);
-    return data?.contact?.id || null;
+    const raw = await res.text();
+    console.log(`📥 GHL response (${res.status}):`, raw);
+
+    const data = JSON.parse(raw);
+
+    // GHL returns contact.id on create, or contact.id inside contact on duplicate
+    const contactId = data?.contact?.id || data?.id || null;
+    if (contactId) {
+      console.log('✅ GHL Contact ID:', contactId);
+    } else {
+      console.warn('⚠️ No contact ID returned. Full response:', raw);
+    }
+    return contactId;
 
   } catch (err) {
-    console.error('❌ Contact error:', err);
+    console.error('❌ GHL Contact error:', err.message);
     return null;
   }
 }
@@ -628,4 +684,10 @@ function resetFollowUpTimer(contactId, lead) {
 // ============================================================
 app.listen(process.env.PORT || 3000, () => {
   console.log('🔥 Lhyn AI Sales Bot — READY');
+  console.log('🔑 ENV CHECK:');
+  console.log('  GHL_API_KEY:        ', GHL_API_KEY       ? '✅ set' : '❌ MISSING');
+  console.log('  OPENROUTER_API_KEY: ', OPENROUTER_API_KEY ? '✅ set' : '❌ MISSING');
+  console.log('  RESEND_API_KEY:     ', RESEND_API_KEY     ? '✅ set' : '❌ MISSING');
+  console.log('  CALENDAR_ID:        ', CALENDAR_ID        ? '✅ set' : '⚠️  not set (optional)');
+  console.log('  NOTIFY_EMAIL:       ', NOTIFY_EMAIL);
 });
