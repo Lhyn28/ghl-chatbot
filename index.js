@@ -38,7 +38,7 @@ async function callOpenRouter(conversationId, contactName) {
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+      'Authorization': `Bearer ${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}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -70,7 +70,7 @@ async function sendGHLMessage(conversationId, message) {
   await fetch('https://services.leadconnectorhq.com/conversations/messages', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${GHL_API_KEY}`,
+      'Authorization': `Bearer ${pit-d1e079d0-0927-45e7-b9eb-6c3747ec4037}`,
       'Content-Type': 'application/json',
       'Version': '2021-04-15'
     },
