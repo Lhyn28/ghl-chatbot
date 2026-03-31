@@ -17,23 +17,26 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     conversationHistory[conversation_id] = [];
   }
 
-  conversationHistory[conversation_id].push({
-    role: 'user',
-    content: message
-  });
+  // ✅ Only store valid messages
+  if (message && message.trim() !== "") {
+    conversationHistory[conversation_id].push({
+      role: 'user',
+      content: message
+    });
 
-  const aiReply = await callOpenRouter(conversation_id, contact_name);
+    const aiReply = await callOpenRouter(conversation_id, contact_name);
 
-  conversationHistory[conversation_id].push({
-    role: 'assistant',
-    content: aiReply
-  });
+    conversationHistory[conversation_id].push({
+      role: 'assistant',
+      content: aiReply
+    });
 
-  await sendGHLMessage(conversation_id, aiReply);
+    await sendGHLMessage(conversation_id, aiReply);
+  }
 });
 
 async function callOpenRouter(conversationId, contactName) {
-  const history = conversationHistory[conversationId];
+  const history = conversationHistory[conversationId] || [];
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -55,17 +58,18 @@ Your job:
 - Keep replies short (2–4 sentences)
 - Ask helpful follow-up questions`
         },
-        ...history
+        // ✅ FILTER invalid messages (THIS FIXES YOUR ERROR)
+        ...history.filter(msg => msg.content && msg.content.trim() !== "")
       ]
     })
   });
 
   const data = await response.json();
 
-  // 🔥 DEBUG LOG (IMPORTANT)
+  // 🔥 DEBUG LOG
   console.log("OPENROUTER RESPONSE:", JSON.stringify(data, null, 2));
 
-  // ✅ SAFE CHECK (prevents crash)
+  // ✅ Safe fallback
   if (!data.choices || !data.choices[0]) {
     return "Sorry, something went wrong. Please try again.";
   }
