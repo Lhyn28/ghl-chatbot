@@ -13,69 +13,48 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
   console.log("🔥 WEBHOOK HIT:", JSON.stringify(req.body, null, 2));
 
-  // ❗ IMPORTANT: use contact_id first
-  const contactId = req.body.contact_id;
+  // ✅ FIX: Use correct conversation ID from GHL
+  const conversation_id =
+    req.body.conversation_id ||
+    req.body.conversationId ||
+    req.body.customData?.conversation_id;
 
   const message = req.body.message;
   const contact_name = req.body.contact_name || req.body.full_name;
 
   res.sendStatus(200);
 
-  if (!conversationHistory[contactId]) {
-    conversationHistory[contactId] = [];
+  if (!conversation_id) {
+    console.log("❌ No conversation_id received");
+    return;
   }
 
+  if (!conversationHistory[conversation_id]) {
+    conversationHistory[conversation_id] = [];
+  }
+
+  // ✅ Safe message handling
   const userMessage = typeof message === "string"
     ? message
     : message?.body || "";
 
   if (userMessage && userMessage.trim() !== "") {
 
-    conversationHistory[contactId].push({
+    conversationHistory[conversation_id].push({
       role: 'user',
       content: userMessage
     });
 
-    const aiReply = await callOpenRouter(contactId, contact_name);
+    const aiReply = await callOpenRouter(conversation_id, contact_name);
 
-    conversationHistory[contactId].push({
+    conversationHistory[conversation_id].push({
       role: 'assistant',
       content: aiReply
     });
 
-    // 🔥 GET REAL CONVERSATION ID
-    const realConversationId = await getConversationId(contactId);
-
-    console.log("✅ Real Conversation ID:", realConversationId);
-
-    if (realConversationId) {
-      await sendGHLMessage(realConversationId, aiReply);
-    } else {
-      console.log("❌ No conversation found");
-    }
+    await sendGHLMessage(conversation_id, aiReply);
   }
 });
-
-
-// ✅ NEW FUNCTION (IMPORTANT)
-async function getConversationId(contactId) {
-  const response = await fetch(
-    `https://services.leadconnectorhq.com/conversations/search?contactId=${contactId}`,
-    {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${GHL_API_KEY}`,
-        'Version': '2021-04-15'
-      }
-    }
-  );
-
-  const data = await response.json();
-
-  console.log("🔍 Conversation Search:", JSON.stringify(data, null, 2));
-
-  return data.conversations?.[0]?.id;
-}
 
 
 async function callOpenRouter(conversationId, contactName) {
@@ -136,6 +115,7 @@ async function sendGHLMessage(conversationId, message) {
     })
   });
 }
+
 
 app.listen(process.env.PORT || 3000, () => {
   console.log('AI chatbot server running 🔥');
