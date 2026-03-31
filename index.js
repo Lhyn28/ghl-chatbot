@@ -1,15 +1,18 @@
 import express from 'express';
 import fetch from 'node-fetch';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 const app = express();
 app.use(express.json());
 
+// 🔥 Railway automatically provides these
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const CALENDAR_ID = process.env.CALENDAR_ID;
+
+// 🔥 Safety check (prevents silent failure)
+if (!GHL_API_KEY || !OPENROUTER_API_KEY || !CALENDAR_ID) {
+  console.error("❌ Missing ENV variables. Check Railway settings.");
+}
 
 const conversationHistory = {};
 const leadData = {};
@@ -24,7 +27,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     res.sendStatus(200);
     if (!contactId) return;
 
-    // RESET TIMERS
+    // 🔥 Reset follow-up timers
     if (timers[contactId]) {
       clearTimeout(timers[contactId].t1);
       clearTimeout(timers[contactId].t2);
@@ -50,23 +53,23 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
     conversationHistory[contactId].push({ role: 'user', content: userMessage });
 
-    // CAPTURE NAME
+    // 🔥 Capture Name
     if (!leadData[contactId].name) {
       const name = extractName(userMessage);
       if (name) leadData[contactId].name = name;
     }
 
-    // CAPTURE EMAIL
+    // 🔥 Capture Email
     if (!leadData[contactId].email) {
       const email = extractEmail(userMessage);
       if (email) leadData[contactId].email = email;
     }
 
-    // DATE
+    // 🔥 Capture Date
     const date = detectDate(userMessage);
     if (date) leadData[contactId].booking.date = date;
 
-    // TIME
+    // 🔥 Capture Time
     const timeMatch = userMessage.match(/\d{1,2}\s?(am|pm)/i);
     if (timeMatch) leadData[contactId].booking.time = timeMatch[0];
 
@@ -112,7 +115,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
       }
     }
 
-    // BOOKING
+    // 🔥 BOOKING
     if (
       leadData[contactId].booking.date &&
       leadData[contactId].booking.time &&
@@ -138,7 +141,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
         leadData[contactId].booking.time
       );
 
-      reply = `Perfect 😊 you're booked for ${formatted}. I’ll send confirmation to your email!`;
+      reply = `Perfect 😊 you're booked for ${formatted}. Check your email!`;
     }
 
     await sendMessage(contactId, reply);
@@ -146,66 +149,24 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
     processAsync(contactId);
 
-    // FOLLOW UPS
+    // 🔥 FOLLOW UPS
     timers[contactId] = {
       t1: setTimeout(() => {
         sendMessage(contactId, "Hey 😊 just checking in — still interested?");
       }, 2 * 60 * 1000),
 
       t2: setTimeout(() => {
-        sendMessage(contactId, "No worries 😊 I know you're busy. I’ll close this for now — feel free to message anytime!");
+        sendMessage(contactId, "No worries 😊 I know you're busy. Feel free to message anytime!");
       }, 5 * 60 * 1000)
     };
 
   } catch (err) {
-    console.log("❌ ERROR:", err);
+    console.error("❌ ERROR:", err);
   }
 });
 
 
-// 🔥 YOUR SALES BRAIN (MOST IMPORTANT PART)
-function getBusinessContext() {
-  return `
-You are Lhyn’s personal sales assistant.
-
-ABOUT LHYN:
-- Funnel builder & automation specialist
-- Helps businesses get more leads and sales
-- Focuses on high-converting funnels and systems
-
-SERVICES:
-- Funnel building
-- Automation setup
-- Lead generation systems
-- CRM workflows (GoHighLevel)
-
-PRICING:
-- Customized based on client needs
-- Free consultation call offered
-
-PERSONALITY:
-- Friendly
-- Natural
-- Human
-- Not robotic
-- Not pushy
-
-SALES BEHAVIOR:
-- Ask questions to understand needs
-- Recommend solutions naturally
-- Guide toward booking a call
-- Build trust first
-
-IMPORTANT RULES:
-- NEVER say “I don’t know”
-- If unsure → guide toward a call
-- Keep conversation flowing
-- Sound like a real human assistant
-`;
-}
-
-
-// AI
+// 🔥 AI BRAIN
 async function safeAIReply(contactId) {
   try {
     const history = conversationHistory[contactId];
@@ -221,7 +182,18 @@ async function safeAIReply(contactId) {
         messages: [
           {
             role: 'system',
-            content: getBusinessContext()
+            content: `
+You are Lhyn’s personal assistant.
+
+You help with:
+- Funnel building
+- Automations
+- Lead generation
+
+Be human, friendly, and helpful.
+Never say "I don't know".
+Guide user toward booking a call.
+`
           },
           ...history
         ]
@@ -237,7 +209,7 @@ async function safeAIReply(contactId) {
 }
 
 
-// CALENDAR
+// 🔥 CALENDAR
 async function getAvailableSlots() {
   try {
     const res = await fetch(
@@ -292,11 +264,8 @@ function extractName(text) {
 
 function detectDate(text) {
   const today = new Date();
-  text = text.toLowerCase();
-
   let d = new Date(today);
-  if (text.includes("tomorrow")) d.setDate(d.getDate() + 1);
-
+  if (text.toLowerCase().includes("tomorrow")) d.setDate(d.getDate() + 1);
   return d;
 }
 
@@ -392,5 +361,5 @@ async function sendMessage(contactId, message) {
 }
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 SALES ASSISTANT LIVE");
+  console.log("🔥 FIXED & RUNNING");
 });
