@@ -13,30 +13,19 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
   console.log("🔥 WEBHOOK HIT:", JSON.stringify(req.body, null, 2));
 
-  // ✅ Extract conversation ID safely
-  let conversation_id =
-    req.body.conversation_id ||
-    req.body.conversationId ||
-    req.body.customData?.conversation_id;
-
-  // 🔥 FIX: handle object case
-  if (typeof conversation_id === "object") {
-    conversation_id = conversation_id.id || conversation_id._id || "";
-  }
-
-  // ❌ Catch invalid values
-  if (!conversation_id || conversation_id === "[object Object]") {
-    console.log("❌ Invalid conversation_id:", conversation_id);
-    return res.sendStatus(200);
-  }
-
+  const contactId = req.body.contact_id;
   const message = req.body.message;
   const contact_name = req.body.contact_name || req.body.full_name;
 
   res.sendStatus(200);
 
-  if (!conversationHistory[conversation_id]) {
-    conversationHistory[conversation_id] = [];
+  if (!contactId) {
+    console.log("❌ No contact_id");
+    return;
+  }
+
+  if (!conversationHistory[contactId]) {
+    conversationHistory[contactId] = [];
   }
 
   // ✅ Safe message extraction
@@ -49,19 +38,20 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     return;
   }
 
-  conversationHistory[conversation_id].push({
+  conversationHistory[contactId].push({
     role: 'user',
     content: userMessage
   });
 
-  const aiReply = await callOpenRouter(conversation_id, contact_name);
+  const aiReply = await callOpenRouter(contactId, contact_name);
 
-  conversationHistory[conversation_id].push({
+  conversationHistory[contactId].push({
     role: 'assistant',
     content: aiReply
   });
 
-  await sendGHLMessage(conversation_id, aiReply);
+  // ✅ SEND USING contactId (NO MORE conversation_id issues)
+  await sendGHLMessage(contactId, aiReply);
 });
 
 
@@ -106,10 +96,10 @@ Your job:
 }
 
 
-// ✅ Send message to GHL
-async function sendGHLMessage(conversationId, message) {
+// ✅ Send message to GHL using contactId
+async function sendGHLMessage(contactId, message) {
 
-  console.log("📤 Sending message to GHL:", conversationId, message);
+  console.log("📤 Sending message using contactId:", contactId, message);
 
   try {
     const response = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
@@ -121,7 +111,7 @@ async function sendGHLMessage(conversationId, message) {
       },
       body: JSON.stringify({
         type: 'Live_Chat',
-        conversationId,
+        contactId: contactId, // ✅ KEY CHANGE
         message
       })
     });
