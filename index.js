@@ -41,31 +41,28 @@ app.post('/webhook/ghl-chat', async (req, res) => {
     content: userMessage
   });
 
-  // 🔥 NAME DETECTION
+  // 🔥 NAME
   if (!leadData[contactId].name && userMessage.length < 30 && !userMessage.includes("@")) {
     leadData[contactId].name = userMessage;
   }
 
-  // 🔥 EMAIL DETECTION + CREATE CONTACT
+  // 🔥 EMAIL + CREATE CONTACT
   if (!leadData[contactId].email && userMessage.includes("@")) {
     leadData[contactId].email = userMessage;
 
     const newId = await createContactIfNotExists(leadData[contactId]);
-    if (newId) {
-      leadData[contactId].ghlId = newId;
-    }
+    if (newId) leadData[contactId].ghlId = newId;
   }
 
-  // 🔥 DATE
-  if (!leadData[contactId].booking.date) {
-    if (userMessage.toLowerCase().includes("tomorrow")) {
-      leadData[contactId].booking.date = "Tomorrow";
-    }
+  // 🔥 DATE DETECTION (SMART)
+  const detectedDate = getDateFromText(userMessage);
+  if (detectedDate) {
+    leadData[contactId].booking.date = detectedDate;
   }
 
-  // 🔥 TIME
+  // 🔥 TIME DETECTION
   if (!leadData[contactId].booking.time) {
-    const match = userMessage.match(/\d{1,2}(am|pm)/i);
+    const match = userMessage.match(/\d{1,2}\s?(am|pm)/i);
     if (match) {
       leadData[contactId].booking.time = match[0];
     }
@@ -94,9 +91,39 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 });
 
 
+// 🧠 DATE PARSER
+function getDateFromText(text) {
+  const today = new Date();
+  text = text.toLowerCase();
+
+  let d = new Date(today);
+
+  if (text.includes("day after tomorrow")) {
+    d.setDate(d.getDate() + 2);
+  } else if (text.includes("tomorrow")) {
+    d.setDate(d.getDate() + 1);
+  } else {
+    return null;
+  }
+
+  return d.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  });
+}
+
+
 // 🤖 AI
 async function callOpenRouter(contactId, lead) {
   const history = conversationHistory[contactId] || [];
+
+  const hour = new Date().getHours();
+  let greeting = "Hello";
+
+  if (hour < 12) greeting = "Good morning 😊";
+  else if (hour < 18) greeting = "Good afternoon 😊";
+  else greeting = "Good evening 😊";
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -109,26 +136,32 @@ async function callOpenRouter(contactId, lead) {
       messages: [
         {
           role: 'system',
-          content: `You are a friendly human assistant named Lhyn.
+          content: `${greeting}
 
-RULES:
+You are a friendly human assistant named Lhyn.
+
+IMPORTANT:
 - Never send user to website
-- Answer everything directly
-- Be natural and conversational
+- Always answer directly
+- Always use real dates (e.g., April 3, 2026)
+
+SERVICES:
+Funnels, automation, AI chatbot, lead generation.
 
 FLOW:
 - Ask name
 - Ask email once
-- Ask what they need
-- Guide to booking
+- Ask needs
+- Qualify
+- Guide booking
 
 BOOKING:
 - Suggest times
-- Confirm
-- Say you'll handle it
+- Confirm date and time clearly
+- Say you'll handle booking
 
 STYLE:
-Short, friendly, human`
+Short, warm, natural`
         },
         ...history
       ]
@@ -148,7 +181,7 @@ Short, friendly, human`
 // 🔥 CREATE CONTACT
 async function createContactIfNotExists(lead) {
   try {
-    const response = await fetch(`https://services.leadconnectorhq.com/contacts/`, {
+    const res = await fetch(`https://services.leadconnectorhq.com/contacts/`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${GHL_API_KEY}`,
@@ -160,20 +193,17 @@ async function createContactIfNotExists(lead) {
       })
     });
 
-    const data = await response.json();
-    console.log("✅ CONTACT CREATED:", data);
-
+    const data = await res.json();
     return data.contact?.id;
 
   } catch (err) {
-    console.log("❌ CREATE ERROR:", err);
+    console.log("❌ CONTACT ERROR:", err);
   }
 }
 
 
 // 📅 SAVE BOOKING
 async function saveBookingToGHL(contactId, lead) {
-
   const id = lead.ghlId || contactId;
 
   await fetch(`https://services.leadconnectorhq.com/contacts/${id}`, {
@@ -194,7 +224,6 @@ async function saveBookingToGHL(contactId, lead) {
 
 // 📩 EMAIL TRANSCRIPT
 async function sendConversationEmail(contactId) {
-
   const history = conversationHistory[contactId];
   if (!history) return;
 
@@ -209,9 +238,9 @@ async function sendConversationEmail(contactId) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      from: "Lhyn <onboarding@resend.dev>",
+      from: "Lhyn <hello@lhynworks.com>",
       to: ["yourteam@email.com"],
-      subject: "New Chat Lead",
+      subject: "New Chat Conversation",
       text: transcript
     })
   });
@@ -236,7 +265,7 @@ async function sendGHLMessage(contactId, message) {
 }
 
 
-// ⏱ FOLLOW UPS (2 ONLY)
+// ⏱ FOLLOW-UPS
 function handleFollowUp(contactId) {
 
   if (timers[contactId]) clearTimeout(timers[contactId]);
@@ -253,5 +282,5 @@ function handleFollowUp(contactId) {
 
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🔥 Lhyn AI Assistant LIVE");
+  console.log("🔥 Lhyn AI Assistant with REAL DATE LOGIC");
 });
