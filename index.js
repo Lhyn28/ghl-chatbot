@@ -29,15 +29,15 @@ app.post('/webhook/ghl-chat', async (req, res) => {
       name: null,
       email: null,
       stage: "ask_name",
-      booking: { slot: null, saved: false },
-      ghlId: contactId
+      availableSlots: [],
+      booking: { saved: false }
     };
   }
 
   const lead = leadData[contactId];
 
   // =============================
-  // 🧠 NAME (LOCK)
+  // 🧠 NAME
   // =============================
   if (!lead.name) {
     const name = extractName(message);
@@ -49,7 +49,7 @@ app.post('/webhook/ghl-chat', async (req, res) => {
   // =============================
   if (!lead.email && message.includes("@")) {
     lead.email = message.trim();
-    await createOrUpdateContact(lead);
+    await updateContact(contactId, lead);
   }
 
   let reply = "Got it 😊";
@@ -84,31 +84,29 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
     else {
 
-      // =============================
-      // 🤖 AI (SHORT + SALES)
-      // =============================
+      // 🤖 AI
       reply = await aiReply(message);
 
-      // =============================
-      // 📅 FETCH REAL SLOTS
-      // =============================
+      // 🔥 FETCH REAL SLOTS
       if (shouldSuggestBooking(message)) {
         const slots = await getAvailableSlots();
 
+        lead.availableSlots = slots;
+
         if (slots.length) {
           reply += "\n\nAvailable times:\n" + slots.join("\n");
+        } else {
+          reply += "\n\nLet me check availability for you.";
         }
       }
 
-      // =============================
-      // 📅 USER PICKED SLOT
-      // =============================
+      // 🔥 MATCH SLOT
       const chosen = matchSlot(message, lead.availableSlots);
 
       if (chosen && !lead.booking.saved) {
         lead.booking.saved = true;
 
-        await createAppointment(lead, chosen);
+        await createAppointment(contactId, chosen);
 
         reply = `You're booked ${lead.name} 😊\n📅 ${chosen}`;
       }
@@ -124,11 +122,158 @@ app.post('/webhook/ghl-chat', async (req, res) => {
 
 
 // =============================
-// 🤖 AI (FREE MODEL)
+// 🤖 FREE AI
 // =============================
 async function aiReply(message) {
   try {
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
-        Authorization
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: "openrouter/auto",
+        messages: [
+          {
+            role: "system",
+            content: "Short, helpful, sales-focused replies."
+          },
+          { role: "user", content: message }
+        ]
+      })
+    });
+
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content || "Got it 😊";
+
+  } catch {
+    return "Got it 😊";
+  }
+}
+
+
+// =============================
+// 📅 GET REAL SLOTS
+// =============================
+async function getAvailableSlots() {
+  try {
+
+    const start = new Date();
+    const end = new Date();
+    end.setDate(end.getDate() + 3);
+
+    const res = await fetch(
+      `https://services.leadconnectorhq.com/calendars/${CALENDAR_ID}/free-slots?startTime=${start.toISOString()}&endTime=${end.toISOString()}`,
+      {
+        headers: {
+          Authorization: `Bearer ${GHL_API_KEY}`,
+          Version: "2021-04-15"
+        }
+      }
+    );
+
+    const data = await res.json();
+
+    if (!data?.slots) return [];
+
+    return data.slots.slice(0, 5).map(slot =>
+      new Date(slot).toLocaleString("en-US", {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      })
+    );
+
+  } catch (e) {
+    console.log("Slots error", e);
+    return [];
+  }
+}
+
+
+// =============================
+// 📅 BOOK REAL SLOT
+// =============================
+async function createAppointment(contactId, slot) {
+  const date = new Date(slot);
+
+  await fetch('https://services.leadconnectorhq.com/calendars/events', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${GHL_API_KEY}`,
+      'Content-Type': 'application/json',
+      Version: '2021-04-15'
+    },
+    body: JSON.stringify({
+      calendarId: CALENDAR_ID,
+      contactId,
+      startTime: date.toISOString(),
+      title: "Consultation Call"
+    })
+  });
+}
+
+
+// =============================
+// 📇 CONTACT
+// =============================
+async function updateContact(contactId, lead) {
+  await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${GHL_API_KEY}`,
+      'Content-Type': 'application/json',
+      Version: '2021-04-15'
+    },
+    body: JSON.stringify({
+      firstName: lead.name,
+      email: lead.email
+    })
+  });
+}
+
+
+// =============================
+function matchSlot(message, slots = []) {
+  return slots.find(s => message.includes(s));
+}
+
+function shouldSuggestBooking(message) {
+  return ["price","cost","interested","book","call","help"].some(w =>
+    message.toLowerCase().includes(w)
+  );
+}
+
+function extractName(text) {
+  const clean = text.toLowerCase().trim();
+  if (["hi","hello","hey"].includes(clean)) return null;
+
+  if (clean.split(" ").length === 1) return clean;
+
+  const m = text.match(/i am (.+)|i'm (.+)/i);
+  return m ? m[1] || m[2] : null;
+}
+
+
+// =============================
+async function sendMessage(contactId, message) {
+  await fetch('https://services.leadconnectorhq.com/conversations/messages', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${GHL_API_KEY}`,
+      'Content-Type': 'application/json',
+      Version: '2021-04-15'
+    },
+    body: JSON.stringify({
+      type: 'Live_Chat',
+      contactId,
+      message
+    })
+  });
+}
+
+
+app.listen(3000, () => console.log("🔥 REAL CALENDAR LIVE"));
